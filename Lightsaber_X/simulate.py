@@ -75,6 +75,7 @@ def main(argv):
     del argv  # Unused.
 
     with open('configuration/config.yaml') as f:
+        #config = yaml.load(f, Loader=yaml.loader.BaseLoader)
         config = yaml.load(f, Loader=yaml.FullLoader)
 
     simulation = []
@@ -95,9 +96,14 @@ def main(argv):
     system = create_system(config, simulation, output['out_directory'])
     link_components(system)
 
-    #postprocessing = utils.Postprocessing(simulation)
-
     results = run(system, simulation)
+
+    output_fs = eval(str(output['output_sampling_frequency']))
+    fs = eval(str(simulation['simulation_sampling_frequency']))
+    if output_fs < fs:
+        results = utils.decimate(results, fs, output_fs)
+        simulation['simulation_sampling_frequency'] = output['output_sampling_frequency']
+
     save_results_as_txt(results, simulation, output['out_directory'])
 
 

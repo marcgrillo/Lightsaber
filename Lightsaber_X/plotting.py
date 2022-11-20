@@ -20,7 +20,7 @@ def plot_psd(timeseries: np.ndarray,
     plt.figure()
     if timeseries.ndim > 1:
         for k in range(timeseries.shape[1]):
-            ff, psd, rms = utils.compute_psd(timeseries[:,k], duration_fft, sampling_frequency)
+            ff, psd, rms = utils.compute_psd(timeseries[:, k], duration_fft, sampling_frequency)
             fi1 = np.argmin(np.abs(ff - 0.1))
             fi2 = np.argmin(np.abs(ff - 100))
             plt.loglog(ff[fi1:fi2], np.sqrt(psd[fi1:fi2]), label='rms = {:5.2e}'.format(rms))

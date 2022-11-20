@@ -153,6 +153,19 @@ def compute_psd(
     return ff, psd, rms
 
 
+def decimate(timeseries, fs, output_fs):
+    n_down = fs//output_fs
+    if n_down > 10:
+        for k in range(len(timeseries)):
+            timeseries[k][0] = signal.decimate(timeseries[k][0], 8, axis=0)
+            timeseries[k][0] = signal.decimate(timeseries[k][0], n_down//8, axis=0)
+    else:
+        for k in range(len(timeseries)):
+            timeseries[k][0] = signal.decimate(timeseries[k][0], n_down, axis=0)
+
+    return timeseries
+
+
 class FilterLP:
 
     def __init__(self, data, low_pass, size):
@@ -191,9 +204,11 @@ class Postprocessing:
     reward process, and controls noise is relevant between 10 Hz and 25 Hz we need to whiten the strain noise
     in order that rewards are dominated by the noise in this frequency band."""
 
-    def __init__(self, data):
+    def __init__(self, timeseries, fs, output_fs):
 
-        self.fs = data['simulation_sampling_frequency']
+        self.timeseries = timeseries
+        self.fs = fs
+        self.output_fs = output_fs
         self.band_pass()
         self.band_pass_sos_state = np.zeros((12, 2))
 

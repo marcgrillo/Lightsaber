@@ -4,7 +4,6 @@ SIM:
       type: Simulation
       loop: closed
       simulation_sampling_frequency: 256  # Sampling frequency of the simulation [Hz]; good value 2048Hz
-      agent_sampling_frequency: 256  # Sampling frequency of the agent [Hz]
       duration_batch: 1024  # Duration of time-series of input noises [s]
       duration_fft: 64  # Duration of FFT segment for plots [s]
       seed_for_random: None
@@ -93,8 +92,9 @@ PITCH_CONTROL:
                  -0.161 + 0.409j, -0.161 - 0.409j, -0.313 + 1.217j, -0.313 - 1.217j, -0.268 + 2.941j,
                  -0.268 - 2.941j, -0.24 + 4.39j, -0.24 - 4.39j],
                 [1.5427e+04]]]
-      matrix: ARM_BEAM_X.eigen_to_local  # actuation matrix
-      output: PUM_I.P, PUM_E.P
+      # actuation matrix; note that the actuation signal is given a minus sign before applying it
+      matrix: ARM_BEAM_X.eigen_to_local
+      output: ITM.SUS_P, ETM.SUS_P
 
 RAD_PRESS_COMP:
       type: Controller
@@ -106,11 +106,13 @@ RAD_PRESS_COMP:
                [[0.+1061.47914473j, 0.-1061.47914473j],
                 [-58.29428329-96.14564236j, -58.29428329+96.14564236j],
                 [0.0112201]]]
-      matrix: [[-2/299792458. * ARM_BEAM_X.dydth_soft * ARM_BEAM_X.P_av, 0.],
-               [0., -2/299792458. * ARM_BEAM_X.dydth_hard * (ARM_BEAM_X.P_av - 56700)]] # actuation matrix
+      # actuation matrix; note that the actuation signal is given a minus sign before applying it
+      matrix: ARM_BEAM_X.eigen_to_local @ [[2/299792458. * ARM_BEAM_X.dydth_soft * ARM_BEAM_X.P_av, 0.],
+               [0., 2/299792458. * ARM_BEAM_X.dydth_hard * (ARM_BEAM_X.P_av - 56700)]]
       output: ITM.P, ETM.P
 
 OUTPUT:
       type: Output
       output_channels: PITCH_SENSOR, PITCH_CONTROL, ARM_BEAM_X.P, ITM.P, ETM.P
+      output_sampling_frequency: 256  # Sampling frequency of saved time series [Hz]
       out_directory: data_output

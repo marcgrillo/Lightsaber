@@ -99,10 +99,15 @@ class Laser:
                               os.path.join(plot_dir, 'RIN_spectrum.png'),
                               ylabel='Relative input power fluctuations [Hz$^{-1/2}$]')
 
-        self.P = 0.             # instantaneous power (unidirectional) [W]
-        self.out = None         # output value of this components
+        self.P = 0.                 # instantaneous power (unidirectional) [W]
+        self.out = None             # output value of this components
+        self.input_ch = []          # names of input channels
+        self.output_ch = {'power': 0}   # names of output channels
 
         self.ti = 0  # index running through input noise batch
+
+    def setIO(self, ii_in, ii_out):
+        self.output_ch['power'] = ii_out
 
     def step(self):
         self.P = self.power_tt[self.ti]
@@ -150,6 +155,14 @@ class Beam:
 
         self.high_pass()
 
+        self.input_ch = {'pitch': 0, 'power': 0}    # names of input channels
+        self.output_ch = {'torque': 0}              # names of output channels
+
+    def setIO(self, ii_in, ii_out):
+        self.input_ch['pitch'] = ii_in[0]
+        self.input_ch['power'] = ii_in[1]
+        self.output_ch['tau'] = ii_out
+
     def set_parameters(self, m1, m2, wavelength):
         self.m1 = m1                                                # first mirror
         self.m2 = m2                                                # second mirror
@@ -194,7 +207,7 @@ class Beam:
         self.high_pass_sos_state = zf
 
         # power in the cavity
-        self.P = input_power * np.sqrt(self.m1.T) / np.abs(
+        self.P = input_power * self.m1.T / np.abs(
             1 - np.sqrt(self.m1.R) * np.sqrt(self.m2.R) * np.exp(4j * np.pi * dL_hp[0] / self.wavelength)) ** 2
 
         # running average of cavity power
@@ -434,9 +447,9 @@ def run(system, simulation):
     inputs = {'pitch': np.zeros((2, )), 'in_power': 0., 'readout': np.zeros((2, )), 'rad_torque': np.zeros((2, )),
               'act_mirror': np.zeros((2, )), 'act_sus': np.zeros((2, ))}
 
-    pitch_tt = np.zeros((n_samples, 2))
     cavity_power_tt = np.zeros((n_samples, ))
     actuation_tt = np.zeros((n_samples, 2))
+    pitch_tt = np.zeros((n_samples, 2))
     beam_spot_tt = np.zeros((n_samples, 2))
     readout_tt = np.zeros((n_samples, 2))
 
@@ -463,5 +476,5 @@ def run(system, simulation):
 
     return [[pitch_tt, "rad", "pitch", "Pitch (ITM/ETM)"], [cavity_power_tt, "W", "power", "Cavity power"],
             [actuation_tt, "Nm", "actuation", "Control output (ITM/ETM)"],
-            [beam_spot_tt, "m", "beamspot", "Beam-spot motion (ITM/ETM)"],
+            [beam_spot_tt, "m", "beam_spot", "Beam-spot motion (ITM/ETM)"],
             [readout_tt, "rad", "readout", "Readout (soft/hard)"]]

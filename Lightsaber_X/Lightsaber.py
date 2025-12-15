@@ -367,6 +367,7 @@ class Controller:
         utils.log_attributes(self, dict(seed=seed))
 
         self.name = config_data['name']                                     # name of controller
+        self.controller_name = config_data.get('controller_name', None)     # specific controller variant (C0, C1, etc)
         self.type = config_data['type']                                     # type of component (Sensor)
         self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
         self.T_batch = eval(str(config_data['duration_batch']))             # duration of simulated batch [s]
@@ -385,6 +386,36 @@ class Controller:
         self.out = None                                             # output value of this components
 
     def set_sos_models(self, config_data, plot_dir):
+        if hasattr(self, 'controller_name') and self.controller_name is not None:
+             self.set_feedback_filter_hard(plot_dir)
+             
+             # Soft filter remains from config or default? The snippet only defined 'hard_control_sos'.
+             # Assuming soft control is static or defined in config. 
+             # Let's keep the soft part from config for now, or assume global_control_sos is set fully by the new method.
+             # The snippet sets self.global_control_sos = [self.soft_control_sos, self.hard_control_sos]
+             # So we need to ensure self.soft_control_sos is defined.
+             
+             # Re-parse soft filter from config to be safe/consistent with existing code
+             zz = np.array([eval(str(comp)) for comp in config_data['filter'][0][0]])
+             pp = np.array([eval(str(comp)) for comp in config_data['filter'][0][1]])
+             k = eval(str(config_data['filter'][0][2][0]))
+             zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
+             self.soft_control_sos = signal.zpk2sos(*zpk)
+             self.soft_control_sos_state = np.zeros((len(self.soft_control_sos[:, 0]), 2))
+             
+             # The snippet sets global_control_sos, so we map it back to self.controller_sos
+             # self.controller_sos = self.global_control_sos
+             # But let's check the snippet again. It sets self.global_control_sos. 
+             # The existing code uses self.controller_sos. I should map them.
+             
+             # Initializing states for hard filter provided by method
+             self.hard_control_sos_state = np.zeros((len(self.hard_control_sos[:, 0]), 2))
+             
+             self.controller_sos = [self.soft_control_sos, self.hard_control_sos]
+             self.controller_sos_state = [self.soft_control_sos_state, self.hard_control_sos_state]
+             
+             return
+
         zz = np.array([eval(str(comp)) for comp in config_data['filter'][0][0]])
         pp = np.array([eval(str(comp)) for comp in config_data['filter'][0][1]])
         k = eval(str(config_data['filter'][0][2][0]))
@@ -404,6 +435,107 @@ class Controller:
         if plot_dir:
             plotting.sos_freq_resp(soft_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_soft.png'))
             plotting.sos_freq_resp(hard_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_hard.png'))
+
+    def set_feedback_filter_hard(self, plot_dir):
+        # Example: ASC feedback filter used 2019(?) at LIGO for hard mode
+
+        # --- choose parameters based on controller_name ---
+        name = self.controller_name
+
+        if name == "C0_nominal":
+            # original nominal controller
+            dc_gain = 30.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        elif name == "C1_high_micro":
+            dc_gain = 44.20
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        elif name == "C2_high_micro2":
+            dc_gain = 50.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        else:
+            # fallback to nominal if unknown name
+            dc_gain = 30.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        # --- rest is exactly our old code, using dc_gain, K_opt, etc. ---
+
+        factor = dc_gain * K_opt * l2_ct2tau
+
+        ## low-pass
+        zz_lp1, pp_lp1, k_lp1 = signal.ellip(2, 1., 40., 2. * np.pi * 10., analog=True, output='zpk')
+        zz_lp2, pp_lp2, k_lp2 = signal.ellip(4, 1., 10., 2. * np.pi * 20., analog=True, output='zpk')
+
+        if use_boost:
+            ## boost
+            zz_boost = np.array([-0.322 + 0.299j, -0.322 - 0.299j,
+                                 -0.786 + 0.981j, -0.786 - 0.981j,
+                                 -1.068 + 2.753j, -1.068 - 2.753j,
+                                 -1.53 + 4.13j, -1.53 - 4.13j])
+            pp_boost = np.array([-0.161 + 0.409j, -0.161 - 0.409j,
+                                 -0.313 + 1.217j, -0.313 - 1.217j,
+                                 -0.268 + 2.941j, -0.268 - 2.941j,
+                                 -0.24 + 4.39j, -0.24 - 4.39j])
+            k_boost = factor
+        else:
+            zz_boost = np.array([])
+            pp_boost = np.array([])
+            k_boost = 1.0  # neutral multiplier
+
+        zz_final = np.hstack([zz_ctrl, [-2. * np.pi * 0.1], zz_lp1, zz_lp2, zz_boost])
+        pp_final = np.hstack([pp_ctrl, [0], pp_lp1, pp_lp2, pp_boost])
+        gain_hard = k_ctrl*k_lp1*k_lp2*k_boost
+
+        zpk = signal.bilinear_zpk(zz_final, pp_final, gain_hard, self.fs)
+        self.hard_control_sos = signal.zpk2sos(*zpk)
+
+        # self.global_control_sos = [self.soft_control_sos, self.hard_control_sos]
+        # self.global_control_sos_state = [self.soft_control_sos_state, self.hard_control_sos_state]
+        
+        # NOTE: Mapping to the standard variable names used in step()
+        # self.controller_sos = self.global_control_sos
+
+        if plot_dir:
+            plotting.sos_freq_resp(self.hard_control_sos, self.fs,
+                          os.path.join(plot_dir, f'bode_feedback_hard_{name}.png'))
 
     def step(self, control_in):
         for i in range(len(control_in)):

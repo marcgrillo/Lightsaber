@@ -1,0 +1,5 @@
+--- Simulation Statistics (Grouped by Regime and Controller) ---
+
+Regime: R1_high_micro        | Controller: C0_nominal           | N=  4 | Mean Rw: 0.4209 | Std: 0.0052
+Regime: R1_high_micro        | Controller: C1_high_micro        | N=  3 | Mean Rw: 0.4452 | Std: 0.0025
+Regime: R1_high_micro        | Controller: C2_high_micro2       | N=  3 | Mean Rw: 0.4534 | Std: 0.0055

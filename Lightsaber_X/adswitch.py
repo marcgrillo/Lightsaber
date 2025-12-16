@@ -41,6 +41,12 @@ class AdSwitch(BanditAlgorithm):
         
         # Eviction statistics: stores (mu_tilde, delta_tilde) for evicted arms
         self.eviction_stats = {} 
+        
+        # Track sampling probabilities for diagnostics
+        self.current_sampling_probs = {arm: 0.0 for arm in range(self.num_arms)} 
+        
+        # Track sampling probabilities for diagnostics
+        self.current_sampling_probs = {arm: 0.0 for arm in range(self.num_arms)} 
 
     def _get_stats(self, arm, start_time, end_time):
         """
@@ -79,6 +85,10 @@ class AdSwitch(BanditAlgorithm):
         Eligible = GOOD arms U BAD arms with active sampling obligations.
         """
         self.t += 1 # Increment time step for the new round
+        
+        # Reset diagnostic probabilities
+        for arm in range(self.num_arms):
+            self.current_sampling_probs[arm] = 0.0
 
         # 1. Add checks for bad arms (sampling obligations)
         # For all a in BAD_t
@@ -99,6 +109,9 @@ class AdSwitch(BanditAlgorithm):
                 # Probability p_epsilon = epsilon * sqrt(l / (K * T * log T))
                 current_episode_idx = self.l + 1
                 prob = epsilon * math.sqrt(current_episode_idx / (self.num_arms * self.T * self.log_T))
+                
+                # Update diagnostic (store the max probability encountered for this arm)
+                self.current_sampling_probs[arm] = max(self.current_sampling_probs[arm], prob)
                 
                 if np.random.random() < prob:
                     n_samples = math.ceil(2 * (2**(2*i + 1)) * self.log_T)

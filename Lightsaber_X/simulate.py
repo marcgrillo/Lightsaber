@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional, Union
 PathLike = Union[str, pathlib.Path]
 
 # --- Configuration Constants ---
-NUM_STEPS = 10 # Total simulation steps (batches)
+NUM_STEPS = 1000 # Total simulation steps (batches)
 REGIME_SWITCH_PROB = 0.2 
 SWITCH_INTERVAL = 50 
 
@@ -172,7 +172,7 @@ def main(argv):
     # 2. Initialize Bandit
     # 3 arms (C0, C1, C2)
     # Horizon = NUM_STEPS (batches)
-    bandit = AdSwitch(num_arms=3, horizon=NUM_STEPS, C1=4.0)
+    bandit = AdSwitch(num_arms=3, horizon=NUM_STEPS, C1=0.0001)
 
     # Tracking Data
     history = {
@@ -188,9 +188,9 @@ def main(argv):
     bandit_history = {
         'step': [],
         'episode_start': [],
-        'arm0_mean': [], 'arm0_n': [], 'arm0_good': [],
-        'arm1_mean': [], 'arm1_n': [], 'arm1_good': [],
-        'arm2_mean': [], 'arm2_n': [], 'arm2_good': []
+        'arm0_mean': [], 'arm0_n': [], 'arm0_good': [], 'arm0_prob': [],
+        'arm1_mean': [], 'arm1_n': [], 'arm1_good': [], 'arm1_prob': [],
+        'arm2_mean': [], 'arm2_n': [], 'arm2_good': [], 'arm2_prob': []
     }
     
     # Optimal mapping for Regret calculation
@@ -295,14 +295,15 @@ def main(argv):
             bandit_history[f'arm{arm_idx}_mean'].append(mu)
             bandit_history[f'arm{arm_idx}_n'].append(n)
             bandit_history[f'arm{arm_idx}_good'].append(is_good)
+            bandit_history[f'arm{arm_idx}_prob'].append(bandit.current_sampling_probs.get(arm_idx, 0.0))
 
         # Save last step detailed data
         if step == NUM_STEPS - 1:
             save_results_as_txt(results, simulation, output['out_directory'], step, regime_info['name'], controller_name)
 
-    # --- Plotting Summary ---
-    plot_summary(history)
-    save_bandit_stats(bandit_history)
+        # --- Plotting Summary ---
+        plot_summary(history)
+        save_bandit_stats(bandit_history)
 
 def plot_summary(history):
     steps = history['step']
@@ -349,7 +350,7 @@ def save_bandit_stats(bandit_history):
     df = pd.DataFrame(bandit_history)
     stats_file = 'data_output/bandit_internal_stats.csv'
     df.to_csv(stats_file, index=False)
-    print(f"Bandit internal stats saved to {stats_file}")
+    #print(f"Bandit internal stats saved to {stats_file}")
     
     # Plot Estimated Means
     plt.figure(figsize=(12, 6))
@@ -376,7 +377,7 @@ def save_bandit_stats(bandit_history):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.savefig('data_output/bandit_estimated_means.png')
-    print("Bandit means plot saved to data_output/bandit_estimated_means.png")
+    #print("Bandit means plot saved to data_output/bandit_estimated_means.png")
 
 def save_stats_and_plots(history):
     """
@@ -401,7 +402,7 @@ def save_stats_and_plots(history):
             std = rewards.std()
             f.write(f"Regime: {regime:<20} | Controller: {controller:<20} | N={cnt:3d} | Mean Rw: {avg:.4f} | Std: {std:.4f}\n")
     
-    print(f"Statistics saved to {stats_file}")
+    #print(f"Statistics saved to {stats_file}")
 
     # 2. Histogram Plots
     # Create a figure with one subplot per Regime
@@ -431,7 +432,7 @@ def save_stats_and_plots(history):
         plt.tight_layout()
         hist_file = 'data_output/simulation_histograms.png'
         plt.savefig(hist_file)
-        print(f"Histograms saved to {hist_file}")
+        #print(f"Histograms saved to {hist_file}")
 
 if __name__ == '__main__':
     start_time = time.time()

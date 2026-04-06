@@ -1,0 +1,16 @@
+# Temporary test data
+data/temporary_test_data/
+# Bandit outputs
+data_output/bandit_test/
+decisions.npy
+
+# Results & Debugging Output
+results/
+results_*/
+*.npz
+*.png
+debug*.json
+
+# Python caches
+__pycache__/
+*.pyc

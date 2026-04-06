@@ -405,6 +405,36 @@ class Controller:
             plotting.sos_freq_resp(soft_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_soft.png'))
             plotting.sos_freq_resp(hard_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_hard.png'))
 
+    def set_controller_variant(self, config_data, variant_name, plot_dir=False):
+        """
+        Dynamically cross-fades explicit mathematical variants over the physical filter logic (e.g. C0_nominal, C1_high_micro).
+        Used organically by the Bandit algorithm to hot-swap controller states online.
+        Maintains the existing running state history without zeroing delays, unless inherently overridden by SOS shape swaps.
+        """
+        if variant_name in config_data:
+            variant_config = config_data[variant_name]
+            # Temporarily override layout schema to generate matching SOS logic cleanly
+            original_filter = config_data['filter']
+            config_data['filter'] = variant_config['filter']
+            self.set_sos_models(config_data, plot_dir)
+            config_data['filter'] = original_filter
+        else:
+            print(f"Warning: Variant {variant_name} not found in config for {self.name}")
+
+    def get_sos_for_numba(self):
+        """
+        Extracts contiguous hardware-level arrays of the SOS logic and memory state arrays to feed Numba JIT kernels.
+        ADVANCED FEATURE: Utilizes `.astype(np.float64, copy=False)` or raw property pass-through to ensure the kernel
+        modifies the EXACT physical memory space used by the `Controller` object. Prevents deep loops from "amnesia"
+        clearing historical controller delay lines which would manifest strictly as massive ringing for high-gain loops.
+        """
+        return (
+            np.ascontiguousarray(self.controller_sos[0].astype(np.float64, copy=False)),
+            np.ascontiguousarray(self.controller_sos_state[0]),
+            np.ascontiguousarray(self.controller_sos[1].astype(np.float64, copy=False)),
+            np.ascontiguousarray(self.controller_sos_state[1])
+        )
+
     def step(self, control_in):
         for i in range(len(control_in)):
             output, zf = utils.faster_sosfilt(self.controller_sos[i], np.array([control_in[i]]), zi=self.controller_sos_state[i])

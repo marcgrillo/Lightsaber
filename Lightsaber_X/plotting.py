@@ -1,188 +1,196 @@
-"""This module contains common plotting functionalities."""
-
 import os
-from typing import Optional
-
-import utils
-
-import matplotlib.pyplot as plt
+import glob
 import numpy as np
 import pandas as pd
-from scipy import signal
+import matplotlib.pyplot as plt
 
+def parse_bandit_log(log_abspath):
+    """
+    Parses a bandit log file into a DataFrame.
+    Format: Step | Regime | Controller | Reward | Raw | Err | NumClusters | PickedCluster
+    """
+    data = []
+    if not os.path.exists(log_abspath): return pd.DataFrame()
 
-def plot_psd(timeseries: np.ndarray,
-             duration_fft: int,
-             sampling_frequency: int,
-             filename: str,
-             ylabel: str = 'Spectrum [Hz$^{-1/2}$]'):
+    with open(log_abspath, 'r') as f:
+        for line in f:
+            if "|" not in line: continue
+            parts = [p.strip() for p in line.split('|')]
+            
+            try:
+                step = int(parts[0])
+                regime = parts[1]
+                controller_str = parts[2]
+                
+                # Robust extraction of C0, C1, C2 index
+                c_idx = -1
+                for i in range(10): # support up to 10 controllers
+                    if f"C{i}" in controller_str:
+                        c_idx = i
+                        break
+                        
+                reward = float(parts[3])
+                
+                raw_score = np.nan
+                rms_err = np.nan
+                num_clusters = np.nan
+                picked_cluster = np.nan
+                
+                if len(parts) >= 5:
+                    try: raw_score = float(parts[4])
+                    except: pass
+                if len(parts) >= 6:
+                    try: rms_err = float(parts[5])
+                    except: pass
+                if len(parts) >= 7:
+                    try: num_clusters = float(parts[6])
+                    except: pass
+                if len(parts) >= 8:
+                    try: picked_cluster = float(parts[7])
+                    except: pass
 
-    plt.figure()
-    if timeseries.ndim > 1:
-        for k in range(timeseries.shape[1]):
-            ff, psd, rms = utils.compute_psd(timeseries[:, k], duration_fft, sampling_frequency)
-            fi1 = np.argmin(np.abs(ff - 0.1))
-            fi2 = np.argmin(np.abs(ff - 100))
-            plt.loglog(ff[fi1:fi2], np.sqrt(psd[fi1:fi2]), label='rms = {:5.2e}'.format(rms))
+                data.append({
+                    'Step': step,
+                    'Regime': regime,
+                    'Controller': c_idx,
+                    'Reward': reward,
+                    'raw_score': raw_score,
+                    'rms_err': rms_err,
+                    'NumClusters': num_clusters,
+                    'PickedCluster': picked_cluster
+                })
+            except (ValueError, IndexError):
+                continue
+                
+    return pd.DataFrame(data)
+
+def plot_bandit_log(log_file, out_file=None):
+    """
+    Generates a 4-panel diagnostic plot for a bandit log.
+    """
+    df = parse_bandit_log(log_file)
+    if df.empty:
+        print(f"Warning: Empty log file {log_file}")
+        return
+
+    if out_file is None:
+        out_file = log_file.replace(".txt", ".png")
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 14), sharex=True)
+    
+    # 1. Regime vs Time
+    unique_regimes = sorted(df['Regime'].unique())
+    regime_map = {r: i for i, r in enumerate(unique_regimes)}
+    df['RegimeIdx'] = df['Regime'].map(regime_map)
+    axes[0].step(df['Step'], df['RegimeIdx'], where='post', color='#1f77b4', linewidth=2)
+    axes[0].set_ylabel('Regime')
+    
+    # Limit number of y-axis labels to 10
+    indices = np.arange(len(unique_regimes))
+    if len(indices) > 10:
+        indices_to_show = np.linspace(0, len(indices) - 1, 10, dtype=int)
+        axes[0].set_yticks(indices_to_show)
+        axes[0].set_yticklabels([unique_regimes[i] for i in indices_to_show])
     else:
-        ff, psd, rms = utils.compute_psd(timeseries, duration_fft, sampling_frequency)
-        fi1 = np.argmin(np.abs(ff - 0.1))
-        fi2 = np.argmin(np.abs(ff - 100))
-        plt.loglog(ff[fi1:fi2], np.sqrt(psd[fi1:fi2]), label='rms = {:5.2e}'.format(rms))
-    plt.xlim(0.1, 100)
-    plt.xlabel('Frequency [Hz]')
-    plt.ylabel(ylabel)
-    plt.legend()
-    plt.grid(True, which='both')
+        axes[0].set_yticks(list(regime_map.values()))
+        axes[0].set_yticklabels(list(regime_map.keys()))
+        
+    axes[0].grid(True, alpha=0.3)
+    axes[0].set_title(f"Bandit Diagnostic: {os.path.basename(log_file)}")
+
+    # 2. Controller vs Time
+    axes[1].scatter(df['Step'], df['Controller'], color='#ff7f0e', alpha=0.6, s=15, label='Picked Controller')
+    axes[1].set_ylabel('Controller Index')
+    axes[1].set_yticks([0, 1, 2])
+    axes[1].set_yticklabels(['C0', 'C1', 'C2'])
+    axes[1].set_ylim(-0.5, 2.5)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc='upper right')
+
+    # 3. Reward vs Time
+    axes[2].plot(df['Step'], df['Reward'], color='#2ca02c', alpha=0.4, marker='o', markersize=3, linestyle='None')
+    window = min(50, len(df))
+    if window > 5:
+        axes[2].plot(df['Step'], df['Reward'].rolling(window=window, center=True).mean(), color='#2ca02c', linewidth=2, label=f'MA({window})')
+    axes[2].set_ylabel('Reward')
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(loc='upper right')
+
+    # 4. Score/Error vs Time
+    ax4 = axes[3]
+    if 'raw_score' in df.columns and not df['raw_score'].isna().all():
+        ax4.plot(df['Step'], df['raw_score'], color='blue', label='Raw Score', alpha=0.7)
+        ax4.set_ylabel('Score (Log-Lik)', color='blue')
+        ax4.tick_params(axis='y', labelcolor='blue')
+        
+    if 'rms_err' in df.columns and not df['rms_err'].isna().all():
+        ax4b = ax4.twinx()
+        ax4b.plot(df['Step'], df['rms_err'], color='red', linestyle='--', label='RMS Err', alpha=0.7)
+        ax4b.set_ylabel('RMS Error', color='red')
+        ax4b.tick_params(axis='y', labelcolor='red')
+        ax4b.set_yscale('log')
+        
+    ax4.set_xlabel('Time [s]')
+    ax4.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    plt.savefig(filename, dpi=300)
+    plt.savefig(out_file, dpi=150)
     plt.close()
+    print(f"Saved diagnostic plot to {out_file}")
 
+def plot_comparison(run_folder, out_file):
+    """
+    Plots cumulative rewards and advantage vs a best-performing baseline.
+    """
+    log_files = glob.glob(os.path.join(run_folder, "bandit_log_*.txt"))
+    if not log_files:
+        print(f"No log files found in {run_folder}")
+        return
 
-def plot_hoft(h_noise,
-              duration_fft,
-              fs,
-              label,
-              filename,
-              reference_data_file=None,
-              ylimit=None):
-  if reference_data_file is not None:
-    dn = pd.read_csv(
-        reference_data_file,
-        names=['ff', 'susT', 'coatT', 'quantum', 'aplus'],
-        delimiter=' ',
-        skipinitialspace=True)
-    ff = np.array(dn[['ff']].values.flatten())
-    aplus = np.array(dn[['aplus']].values.flatten())
+    # Use a 2-panel plot for better visibility
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    algo_data = {}
 
-  plt.figure()
-  for i in range(len(h_noise[0, :])):
-    ff_data, psd, _ = utils.compute_psd(h_noise[:, i], t_fft=duration_fft, fs=fs)
-    plt.loglog(ff_data, np.sqrt(psd), label=label[i])
+    for lf in sorted(log_files):
+        name = os.path.basename(lf).replace("bandit_log_", "").replace(".txt", "")
+        df = parse_bandit_log(lf)
+        if df.empty: continue
+        df['cum_reward'] = df['Reward'].cumsum()
+        algo_data[name] = df
 
-  if reference_data_file is not None:
-    plt.loglog(ff, aplus, label='AdV LIGO +')
-  plt.xlim(1, 100)
-  if ylimit is not None:
-    plt.ylim(*ylimit)  # arm cavity has 1e-25, 3e-22
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel('Strain noise [Hz$^{-1/2}$]')
-  plt.legend()
-  plt.grid(True, which='both')
-  plt.tight_layout()
-  if filename is not None:
-    plt.savefig(filename, dpi=300)
+    if not algo_data: return
+
+    # Identify best baseline at final step
+    max_step = min([df['Step'].max() for df in algo_data.values()])
+    best_algo = max(algo_data, key=lambda n: algo_data[n][algo_data[n]['Step'] <= max_step]['cum_reward'].iloc[-1])
+    baseline = algo_data[best_algo][['Step', 'cum_reward']].rename(columns={'cum_reward': 'best_baseline'})
+
+    colors = plt.cm.tab10.colors
+    for i, (name, df) in enumerate(algo_data.items()):
+        df = df[df['Step'] <= max_step]
+        merged = pd.merge(df, baseline, on='Step', how='left').ffill()
+        advantage = merged['cum_reward'] - merged['best_baseline']
+        
+        c = colors[i % len(colors)]
+        
+        # 1. Cumulative Reward Advantage
+        ax1.plot(df['Step'], advantage, label=name, color=c, linewidth=2)
+        
+        # 2. Moving Average Reward
+        ma_rew = df['Reward'].rolling(window=min(100, len(df)), center=True).mean()
+        ax2.plot(df['Step'], ma_rew, label=name, color=c, alpha=0.8)
+
+    ax1.set_title("Cumulative Reward Advantage vs Best")
+    ax1.set_ylabel("Advantage")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+
+    ax2.set_title("Moving Average Reward")
+    ax2.set_ylabel("Reward")
+    ax2.set_xlabel("Time [s]")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(out_file, dpi=150)
     plt.close()
-
-
-def plot_diff_disp_noise(deltaL,
-                         T_fft,
-                         fs,
-                         label,
-                         filename: Optional[str] = None):
-
-  plt.figure()
-  for i in range(len(deltaL[0, :])):
-    ff_data, psd, _ = utils.compute_psd(deltaL[:, i], T_fft, fs)
-    plt.loglog(ff_data, np.sqrt(psd), label=label[i])
-
-  plt.xlim(10, 100)
-  plt.ylim(1e-21, 4e-17)
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel('Differential displacement noise [m/Hz$^{1/2}$]')
-  plt.legend()
-  plt.grid(True, which='both')
-  plt.tight_layout()
-  if filename is not None:
-    plt.savefig(filename, dpi=300)
-    plt.close()
-
-
-def sos_freq_resp(sos_sys: np.ndarray,
-                  fs: int,
-                  filename: Optional[str]):
-  f, h = signal.sosfreqz(sos_sys, worN=100000, fs=fs)
-  fi1 = np.argmin(np.abs(f-0.1))
-  fi2 = np.argmin(np.abs(f-100))
-  plt.figure()
-  plt.subplot(2, 1, 1)
-  plt.semilogx(
-      f[fi1:fi2],
-      20 * np.log10(np.abs(h[fi1:fi2])),
-      alpha=0.8)
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel('tf, mag [dB]')
-  plt.xlim(0.1, 100)
-  plt.grid(True, which='both')
-  plt.subplot(2, 1, 2)
-  plt.semilogx(
-      f[fi1:fi2],
-      np.unwrap(np.angle(h[fi1:fi2], deg=True), discont=179),
-      alpha=0.8)
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel('tf, phase [deg]')
-  plt.xlim(0.1, 100)
-  plt.grid(True, which='both')
-  plt.tight_layout()
-  if filename is not None:
-    plt.savefig(filename, dpi=300)
-    plt.close()
-
-
-def transfer_function(sos_sys: np.ndarray,
-                      T: int,
-                      fs: int,
-                      T_fft: int = 64,
-                      ylabel: str = 'Transfer function',
-                      filename: Optional[str] = None):
-
-  # Fourier amplitudes of white noise (not the best choice!!)
-  re = np.random.normal(0, 1, T * fs // 2 + 1)
-  im = np.random.normal(0, 1, T * fs // 2 + 1)
-  wtilde = re + 1j * im
-  wtilde[0] = 0
-
-  input_signal = np.fft.irfft(wtilde) * fs
-
-  tt = np.linspace(0, T, len(input_signal) + 1)
-  tt = tt[0:-1]
-
-  state = signal.sosfilt_zi(sos_sys)
-  output, _ = signal.sosfilt(sos_sys, input_signal, zi=state)
-
-  n_fft = T_fft * fs
-  window = signal.windows.hann(
-      n_fft)  # note that beta>35 does not give you more sidelobe suppression
-  ff, pxy = signal.csd(
-      input_signal,
-      output,
-      fs=fs,
-      window=window,
-      nperseg=n_fft,
-      noverlap=n_fft // 2)
-  ff, pxx = signal.welch(
-      input_signal, fs=fs, window=window, nperseg=n_fft, noverlap=n_fft // 2)
-
-  tf = pxy / pxx
-
-  fi = np.logical_and(
-      ff > 0.1, ff < 100
-  )  # constrain plotted values since this leads to better automatic y-range in the plot
-  plt.figure()
-  plt.subplot(2, 1, 1)
-  plt.semilogx(ff[fi], 20 * np.log10(np.abs(tf[fi])))  # Bode magnitude plot
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel(ylabel + ', mag [dB]')
-  plt.xlim(0.1, 100)
-  plt.grid(True, which='both')
-  plt.subplot(2, 1, 2)
-  plt.semilogx(ff[fi], np.unwrap(np.angle(tf[fi]) * 180. / np.pi,
-                                 discont=179))  # Bode phase plot
-  plt.xlabel('Frequency [Hz]')
-  plt.ylabel(ylabel + ', phase [deg]')
-  plt.xlim(0.1, 100)
-  plt.grid(True, which='both')
-  plt.tight_layout()
-  if filename is not None:
-    plt.savefig(filename, dpi=300)
-    plt.close()
+    print(f"Saved comparison plot to {out_file}")

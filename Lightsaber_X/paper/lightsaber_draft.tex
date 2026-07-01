@@ -1,0 +1,152 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+
+\title{Lightsaber: Time-Domain Simulation of Alignment Sensing and Control \\ \large A Comprehensive Guide to its Physics and Mechanics}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document provides a comprehensive explanation of the physical principles, mathematical models, and mechanics implemented in the Lightsaber time-domain simulator. Designed for readers with a general background in physics, this guide builds intuition from basic concepts in gravitational-wave detection to the specific implementation details of the simulator. Lightsaber models the alignment sensing and control (ASC) systems of interferometric detectors, focusing specifically on the angular (pitch) motions of the heavy mirrors, taking into account seismic noise, mechanical suspensions, radiation pressure, and active feedback control.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Gravitational-wave detectors like LIGO and Virgo are the most sensitive measuring devices ever constructed. To measure the minuscule stretching and squeezing of spacetime caused by passing gravitational waves, these detectors use kilometers-long laser interferometers. The core of these interferometers relies on heavy mirrors, known as test masses, which must be kept perfectly aligned and isolated from the outside world.
+
+The Lightsaber simulator is a specialized software tool designed to model the complex, time-dependent dynamics of these mirrors. Specifically, it focuses on the \textit{pitch} degree of freedom---the tendency of the mirrors to tilt up and down. This document explains the underlying physics that makes keeping these mirrors aligned such a difficult task, and how Lightsaber mathematically simulates these challenges and their solutions.
+
+\section{Background Physics of Gravitational-Wave Detectors}
+Before diving into the simulator's mechanics, it is essential to understand the physical environment of a gravitational-wave detector and the fundamental concepts of seismic attenuation, active control, and optomechanics.
+
+\subsection{The Challenge: Seismic Noise}
+The Earth is constantly vibrating. Ocean waves crashing on distant shores, wind, and human activity create a continuous background of seismic noise. For a gravitational-wave detector, this ground motion is billions of times larger than the signal we are trying to measure. If the mirrors were bolted to the ground, the detector would be completely blinded by these vibrations. Therefore, the mirrors must be exceptionally well-isolated.
+
+\subsection{Passive Seismic Attenuation: Pendulums}
+The primary defense against seismic noise is passive isolation, achieved by suspending the mirrors as pendulums. 
+In classical mechanics, a simple pendulum acts as a mechanical low-pass filter for horizontal ground motion. If the suspension point vibrates at a high frequency $f$, the motion of the mass at the bottom is attenuated by a factor proportional to $1/f^2$ (above the pendulum's resonant frequency). 
+
+To achieve even greater isolation, detectors use \textit{cascaded} pendulums, hanging one mass from another in a chain. A cascade of $N$ pendulums provides an extreme attenuation factor of $1/f^{2N}$ at high frequencies. This passive system is brilliant for blocking high-frequency vibrations (e.g., above 10 Hz, where gravitational-wave signals live). However, at very low frequencies (around 1 Hz), pendulums have resonant modes where they actually amplify ground motion, causing the mirrors to swing wildly.
+
+\subsection{Active Feedback Control}
+Because passive suspensions cannot stop the mirrors from slowly drifting or swinging at their resonant frequencies, the detectors employ \textit{active feedback control}. 
+
+A feedback loop consists of three main parts:
+\begin{enumerate}
+    \item \textbf{Sensors}: Devices that precisely measure the position or angle of the mirror (e.g., optical shadow sensors or the main laser beam itself).
+    \item \textbf{Controller}: A digital computer that takes the sensor reading, compares it to the desired ``zero'' position, and calculates a necessary correction using mathematical filters (like Proportional-Integral-Derivative, or PID, controllers).
+    \item \textbf{Actuators}: Devices (typically electromagnets pushing on small magnets glued to the mirrors or suspension stages) that physically apply the correcting force or torque computed by the controller.
+\end{enumerate}
+This continuous cycle of ``measure, compute, push'' is what keeps the mirrors stable at low frequencies, compensating for the swinging that the passive pendulums cannot fix.
+
+\subsection{Optomechanics and Radiation Pressure}
+Light is not just a wave; it is composed of photons that carry momentum. When a laser beam bounces off a mirror, it transfers some of this momentum, exerting a physical push known as \textbf{radiation pressure}. 
+
+For an everyday laser pointer, this force is entirely negligible. However, inside the arm cavities of a gravitational-wave detector, the laser power is amplified to hundreds of thousands of watts. At these extreme power levels, the radiation pressure exerts a significant physical force (on the order of newtons) on the heavy mirrors.
+
+The interaction between the mechanical motion of the mirror and the light bouncing off it is called \textbf{optomechanics}. As we will see, radiation pressure profoundly alters how the mirrors move, effectively acting as an invisible spring that can be incredibly stiff and, under certain conditions, unstable.
+
+\section{The Lightsaber Simulator: Overview}
+With this background, we can understand the purpose of Lightsaber. It is a time-domain simulator, meaning it calculates the state of the system step-by-step as time ticks forward. 
+
+Its primary job is to model the \textbf{Alignment Sensing and Control (ASC)} loop for the pitch of the mirrors. It tracks how ground noise shakes the suspensions, how the laser beam pushes on the mirrors, how sensors read the resulting misalignment, and how the digital controllers fire the actuators to bring the mirrors back into alignment.
+
+\section{Modeling the Optical Cavity}
+The arm of the detector is a Fabry-Perot cavity---two facing mirrors where light bounces back and forth many times before escaping. This section explains how Lightsaber models the geometry and power of this cavity.
+
+\subsection{Cavity Geometry and Beam Kinematics}
+Consider an arm cavity of length $L$ (which is 4 kilometers in LIGO). The light enters through the Input Test Mass (ITM) and bounces off the End Test Mass (ETM). The mirrors are slightly concave to keep the beam focused, with radii of curvature $R_1$ and $R_2$.
+
+In optics, the stability of such a cavity is described by two dimensionless ``$g$-parameters'':
+\begin{equation}
+    g_1 = 1 - \frac{L}{R_1}, \quad g_2 = 1 - \frac{L}{R_2}
+\end{equation}
+When a mirror tilts by a tiny angle $\theta$ (its pitch), the laser beam bouncing between them walks away from the center of the mirrors. Let $\vec{\theta} = (\theta_1, \theta_2)^T$ be a vector containing the pitch angles of both mirrors. The position of the beam spot on each mirror, denoted $\vec{y}_{BS} = (y_{BS, 1}, y_{BS, 2})^T$, is linearly related to the tilt angles. 
+
+Lightsaber uses a transformation matrix $M_{a \to bs}$ to calculate exactly where the beam spot lands based on how the mirrors are tilted:
+\begin{equation}
+    M_{a \to bs} = \frac{L}{1-g_1 g_2} \begin{pmatrix} g_2 & 1 \\ 1 & g_1 \end{pmatrix}
+\end{equation}
+If there is an intentional offset $\vec{y}_{\text{offset}}$ (meaning we want the beam to hit slightly off-center), the total beam spot position is:
+\begin{equation}
+    \vec{y}_{BS} = M_{a \to bs} \vec{\theta} + \vec{y}_{\text{offset}}
+\end{equation}
+
+\subsection{Power Dynamics and Length Coupling}
+As the mirrors tilt, the off-center beam slightly changes the effective length of the path the light travels. The change in the microscopic arm length $\Delta L$ due to pitch motion is calculated by the inner product (the projection of the beam spot position onto the tilt angle):
+\begin{equation}
+    \Delta L = \vec{y}_{BS} \cdot \vec{\theta}
+\end{equation}
+
+The amount of light power trapped inside the cavity depends exquisitely on its length due to constructive and destructive interference. If the length changes even by a fraction of a wavelength, the power can drop drastically. The circulating power $P(t)$ is given by the physics of Fabry-Perot resonators:
+\begin{equation}
+    P(t) = P_{in}(t) \frac{T_1}{\left| 1 - \sqrt{R_1 R_2} \exp\left(i \frac{4\pi}{\lambda} \Delta L_{hp}(t)\right) \right|^2}
+\end{equation}
+Here, $P_{in}(t)$ is the incoming laser power (which includes realistic, noisy fluctuations), $T_1$ is how much light the input mirror lets through, $\lambda$ is the laser wavelength, and $\Delta L_{hp}(t)$ is the high-pass filtered length change. (The high-pass filter simulates the fact that another, faster control loop handles large, slow length changes, leaving only the rapid fluctuations for this simulation).
+
+\subsection{The Sidles-Sigg Instability}
+This is the most critical physics phenomenon in the simulator. The force exerted by radiation pressure is $F = 2P/c$, where $c$ is the speed of light. 
+
+If the beam spot hits the center of the mirror, it just pushes straight back. But if the beam spot is off-center by a distance $y_{BS}$, the force creates a torque (a twisting force) on the mirror: $\tau = F \times y_{BS}$. 
+
+Because $y_{BS}$ depends on the mirror angle $\theta$ (as shown in section 4.1), the radiation torque depends on the angle. This acts exactly like a mechanical spring (where Force = $-k \times$ displacement). 
+
+In 2006, physicists Sidles and Sigg showed that for standard gravitational-wave detectors, the optomechanical spring constant $k$ is actually negative for certain combinations of mirror tilts. A negative spring constant means that if the mirror tilts slightly, the light pushes it to tilt \textit{even more}. This creates an unstable runaway effect known as the \textbf{Sidles-Sigg instability}.
+
+Lightsaber accurately models this dynamic radiation-pressure torque $\vec{\tau}_{\text{rad}}$ at every time step:
+\begin{equation}
+    \vec{\tau}_{\text{rad}} = \frac{2}{c} P(t) \vec{y}_{BS} - \vec{\tau}_{DC}
+\end{equation}
+(where $\vec{\tau}_{DC}$ is a constant offset torque that we assume is balanced statically).
+
+\section{Modeling the Mechanical System}
+The mirrors are not free-floating; they are attached to complex pendulums. 
+
+\subsection{Time-Domain Filtering}
+Instead of solving huge systems of differential equations for the pendulum physics at every microsecond, Lightsaber uses digital signal processing techniques. The mechanical response of the suspensions is encoded as Transfer Functions---mathematical representations of how the system responds to different frequencies.
+
+These transfer functions are implemented as discrete-time Second-Order Sections (SOS). Conceptually, SOS are highly efficient digital filters (Infinite Impulse Response, or IIR, filters) that take the input torque at the current time step and use the history of previous steps to output the resulting angle, perfectly mimicking the swinging and resonances of the physical pendulum.
+
+The total pitch angle $\vec{\theta}$ of the mirrors in the simulation is the sum of three parts:
+\begin{equation}
+    \vec{\theta} = \vec{\theta}_{\text{sus}} + H_{\text{rad} \to \text{angle}} (\vec{\tau}_{\text{rad}} + \vec{\tau}_{\text{act, mirror}}) + H_{\text{act} \to \text{angle}} (\vec{\tau}_{\text{act, upper}})
+\end{equation}
+where:
+\begin{itemize}
+    \item $\vec{\theta}_{\text{sus}}$ is a noisy time-series representing the random ground vibrations shaking the suspension.
+    \item $H_{\text{rad} \to \text{angle}}$ is the digital filter representing how the mirror reacts to torques applied directly to it (like radiation pressure $\vec{\tau}_{\text{rad}}$ and direct mirror actuators $\vec{\tau}_{\text{act, mirror}}$).
+    \item $H_{\text{act} \to \text{angle}}$ is the digital filter representing how the mirror reacts if we push on the \textit{upper} stages of the pendulum cascade ($\vec{\tau}_{\text{act, upper}}$).
+\end{itemize}
+
+\section{Sensing and Control in Lightsaber}
+To prevent the Sidles-Sigg instability from flipping the mirrors around, the active control loop must step in.
+
+\subsection{Readout}
+First, the simulator measures the tilt. It maps the physical pitch angles into electrical signals via a sensing matrix $M_{\text{sense}}$. Because the Sidles-Sigg effect creates specific unstable modes (called ``soft'' and ``hard'' modes), the sensors are often configured to read out these specific combinations of angles. Lightsaber also adds realistic electronic noise $\vec{n}_{\text{readout}}$ to these measurements:
+\begin{equation}
+    \vec{v}_{\text{readout}} = M_{\text{sense}} \vec{\theta} + \vec{n}_{\text{readout}}
+\end{equation}
+
+\subsection{Digital Controllers}
+Finally, the noisy sensor readings $\vec{v}_{\text{readout}}$ are fed into the simulated digital controller. Like the mechanics, the controller's logic is implemented using SOS digital filters ($H_{\text{ctrl}}$). These filters act as a multi-dimensional PID controller, computing the exact restoring torque needed to fight the instability.
+
+The computed signals are multiplied by an actuation matrix $M_{\text{act}}$ to distribute the forces to the physical actuators:
+\begin{equation}
+    \vec{\tau}_{\text{act}} = - M_{\text{act}} \, H_{\text{ctrl}} (\vec{v}_{\text{readout}})
+\end{equation}
+This actuation torque is fed back into the mechanics equation in the next time step, closing the loop and keeping the virtual detector locked and stable.
+
+\section{Conclusion}
+By synthesizing the physics of cascaded pendulums, Fabry-Perot optics, radiation pressure, and digital feedback loops, the Lightsaber simulator provides a robust virtual laboratory. It allows researchers to design and test new, advanced control filters to tame the extreme optomechanical instabilities present in modern gravitational-wave detectors, without risking the delicate hardware of the real instruments.
+
+\end{document}

@@ -1,16 +1,29 @@
-# Temporary test data
-data/temporary_test_data/
-# Bandit outputs
-data_output/bandit_test/
-decisions.npy
-
-# Results & Debugging Output
-results/
-results_*/
-*.npz
-*.png
-debug*.json
-
-# Python caches
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+
+# Numba JIT cache
+*.nbc
+*.nbi
+
+# Experiment outputs (large, regenerable)
+bandit_runs/
+switching_dynamics/
+paper_characterization/
+
+# Scratch / temp files
+scratch_*.py
+scratch_*.log
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.synctex.gz
+paper/*.fls
+paper/*.fdb_latexmk
+
+# Bad-AI backup (keep local only)
+../Lightsaber_X__badai_backup/

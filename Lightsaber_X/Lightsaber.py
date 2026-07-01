@@ -1,6 +1,6 @@
 """Lightsaber is an ASC time-domain simulator to test novel feedback-filter designs.
 
-Produced by Jan Harms and Tomislav Andric
+Produced by Tomislav Andric and Jan Harms
 
 Collaborators Rana Adhikari and Hang Yu from Caltech provided all the insight and data for the ASC modeling.
 
@@ -14,497 +14,1060 @@ batches.
 import os
 import sys
 
-import dataclasses
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.signal as signal
-import tqdm
+from tqdm import tqdm
+from numpy import genfromtxt
 
-import utils
-import plotting
+#np.seterr(all='raise')
+
+def faster_sosfilt(sos, x, zi):
+    """Copy inputs and go directly to the cython implementation."""
+    x_shape = x.shape
+    zi_shape = zi.shape
+    x_dtype = x.dtype
+    x = np.array([x], order='C', dtype=np.float64)
+    zi = np.array([zi], order='C')
+    signal._sosfilt._sosfilt(sos, x, zi)  # modifies inputs in place
+    x.shape = x_shape
+    zi.shape = zi_shape
+    return (x.astype(x_dtype), zi)
+
+def plot_psd(timeseries, T_fft, fs, ylabel='Spectrum [Hz$^{-1/2}$]', filename=None):
+    n_fft = T_fft*fs
+    window = signal.kaiser(n_fft, beta=35)  # note that beta>35 does not give you more sidelobe suppression
+    ff, psd = signal.welch(timeseries, fs=fs, window=window, nperseg=n_fft, noverlap=n_fft//2)
+
+    rms = np.sqrt(1./T_fft*np.sum(psd))
+
+    plt.figure()
+    plt.loglog(ff, np.sqrt(psd), label='rms = {:5.2e}'.format(rms))
+    plt.xlim(0.1, 100)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(True, which='both')
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+def plot_hoft(h_noise, T_fft, fs, reference_data_file, label, filename=None):
+    
+    n_fft = T_fft*fs
+    window = signal.kaiser(n_fft, beta=35)  # note that beta>35 does not give you more sidelobe suppression
+
+    dn = pd.read_csv(reference_data_file,
+                     names=['ff', 'susT', 'coatT', 'quantum', 'aplus'], delimiter=' ', skipinitialspace=True)
+    ff = np.array(dn[['ff']].values.flatten())
+    aplus = np.array(dn[['aplus']].values.flatten())
+
+    plt.figure()
+    for i in range(len(h_noise[0, :])):
+        ff_data, psd = signal.welch(h_noise[:, i], fs=fs, window=window, nperseg=n_fft, noverlap=n_fft//2)
+        plt.loglog(ff_data, np.sqrt(psd), label=label[i])
+    
+    
+    plt.loglog(ff, aplus, label='AdV LIGO +')
+    plt.xlim(1, 100)
+    plt.ylim(1e-25, 3e-22)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('Strain noise [Hz$^{-1/2}$]')
+    plt.legend()
+    #txt = " / ".join(list(label) + ["AdV LIGO +"])
+    #plt.text(0.02, 0.02, txt, transform=plt.gca().transAxes, fontsize=8)
+    plt.grid(True, which='both')
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+def plot_diff_disp_noise(deltaL, T_fft, fs, label, filename=None):
+
+    n_fft = T_fft*fs
+    window = signal.kaiser(n_fft, beta=35)  # note that beta>35 does not give you more sidelobe suppression
+
+    plt.figure()
+    for i in range(len(deltaL[0, :])):
+        ff_data, psd = signal.welch(deltaL[:, i], fs=fs, window=window, nperseg=n_fft, noverlap=n_fft//2)
+        plt.loglog(ff_data, np.sqrt(psd), label=label[i])
+
+    plt.xlim(10, 100)
+    plt.ylim(1e-21, 4e-17)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('Differential displacement noise [mHz$^{-1/2}$]')
+    plt.legend()
+    plt.grid(True, which='both')
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+def sos_freq_resp(sos_sys, fs, filename=None):
+    w, h = signal.sosfreqz(sos_sys, worN = 100000, fs = fs)
+    plt.figure()
+    plt.subplot(2, 1, 1)
+    plt.semilogx(w, 20*np.log10(np.abs(h)), alpha=0.8)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('tf, mag [dB]')
+    plt.xlim(0.1, 100)
+    plt.grid(True, which='both')
+    plt.subplot(2, 1, 2)
+    plt.semilogx(w[1:46000], np.unwrap(np.angle(h[1:46000], deg=True), discont=179), alpha=0.8)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('tf, phase [deg]')
+    plt.xlim(0.1, 100)
+    plt.grid(True, which='both')
+    plt.tight_layout()
+    #plt.subplots_adjust(hspace=0)
+    #plt.show()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+def transfer_function(sos_sys, T, fs, T_fft=64, ylabel='Transfer function', filename=None):
+
+    # Fourier amplitudes of white noise
+    re = np.random.normal(0, 1, T*fs//2+1)
+    im = np.random.normal(0, 1, T*fs//2+1)
+    wtilde = re + 1j*im
+    wtilde[0] = 0
+
+    input_signal = np.fft.irfft(wtilde)*fs
+
+    tt = np.linspace(0, T, len(input_signal)+1)
+    tt = tt[0:-1]
+
+    state = signal.sosfilt_zi(sos_sys)
+    output, zf = signal.sosfilt(sos_sys, input_signal, zi=state)
+
+    n_fft = T_fft * fs
+    window = signal.hann(n_fft)  # note that beta>35 does not give you more sidelobe suppression
+    ff, pxy = signal.csd(input_signal, output, fs=fs, window=window, nperseg=n_fft, noverlap=n_fft//2)
+    ff, pxx = signal.welch(input_signal, fs=fs, window=window, nperseg=n_fft, noverlap=n_fft//2)
+
+    tf = pxy/pxx
+
+    fi = np.logical_and(ff>0.1, ff<100)     # constrain plotted values since this leads to better automatic y-range in the plot
+    plt.figure()
+    plt.subplot(2, 1, 1)
+    plt.semilogx(ff[fi], 20*np.log10(np.abs(tf[fi])))  # Bode magnitude plot
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel(ylabel +', mag [dB]')
+    plt.xlim(0.1, 100)
+    plt.grid(True, which='both')
+    plt.subplot(2, 1, 2)
+    plt.semilogx(ff[fi], np.unwrap(np.angle(tf[fi])*180./np.pi, discont=179))  # Bode phase plot
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel(ylabel + ', phase [deg]')
+    plt.xlim(0.1, 100)
+    plt.grid(True, which='both')
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
 
 
-class System:
-    def __init__(self):
-        self.components = []
-        self.component_types = []
-
-    def append(self, component):
-        self.components.append(component)
-        self.component_types.append(component.type)
-
-    def get_by_type(self, component_type):
-        selected = []
-        for comp in self.components:
-            if comp.type == component_type:
-                selected.append(comp)
-        return selected
-
-    def get_by_name(self, component_name):
-        selected = []
-        for comp in self.components:
-            if comp.name == component_name:
-                selected.append(comp)
-        return selected
-
-    def reset_counters(self):
-        for c in self.components:
-            c.reset_counters()
-
-    def step(self, inputs):
-        outputs = inputs.copy()
-        for comp in self.components:
-            if isinstance(comp, Laser):
-                comp.step()
-                outputs['in_power'] = comp.out
-            if isinstance(comp, Beam):
-                comp.step(inputs['pitch'], inputs['in_power'])
-                outputs['rad_torque'] = comp.out
-            if isinstance(comp, Controller):
-                comp.step(inputs['readout'])
-                if comp.act_point == 'sus':
-                    outputs['act_sus'] = comp.out
-                else:
-                    outputs['act_mirror'] = comp.out
-            if isinstance(comp, Mirror):
-                mirrors = self.get_by_type('Mirror')
-                i = mirrors.index(comp)
-                comp.step(inputs['rad_torque'][i], inputs['act_sus'][i], inputs['act_mirror'][i])
-                outputs['pitch'][i] = comp.out
-            if isinstance(comp, Sensor):
-                comp.step(inputs['pitch'])
-                outputs['readout'] = comp.out
-
-        return outputs
 
 
-class Laser:
-    def __init__(self, config_data, seed=None, plot_dir=False):
+class Plant:
+
+    def __init__(self, physics, data, parameters, plot_dir, noise_files, reference_data_file, transfer_files, seed=None):
+
+        self.fs = data['sampling_frequency']
+        self.T_batch = data['duration_batch']
+        self.T_fft = data['duration_fft']
+
+        self.ns = []                                      # noise models read from files as PSDs
+        self.tfs = []                                     # transfer functions read from files as complex amplitudes
+        self.tst_noise_t = np.array([])                   # time series of test-mass noise from ISI stage 2, and damping OSEMs at top-mass
+        self.input_power = []                             # time series of input power to the arm cavity
+        self.cavity_power = 0.                            # inside cavity power
+        self.test_mass_angular_local = np.array([0., 0.]) # test mass angles in local basis
+        self.beam_spots = np.array([0., 0.])              # beam spots
+        self.deltaL = 0.                                  # arm length change
+        self.deltaL_hp = 0.                               # high-passed arm length change
+        self.sensitivity = []                             # other noises (without ASC noise)
+        self.dc_offset = np.array([3e-3, -2.6e-3])        # 3 mm DC offset in hard mode
+        self.P_dc = 200000.
+
         self._rng_state = np.random.RandomState(seed=seed)
-        utils.log_attributes(self, dict(seed=seed))
 
-        self.name = config_data['name']                                     # name of laser
-        self.type = config_data['type']                                     # type of component (Sensor)
-        self.P_av = eval(str(config_data['power']))                         # average laser power (unidirectional) [W]
-        self.wavelength = eval(str(config_data['wave_length']))             # laser wavelength [m]
-        self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
-        self.dur_batch = eval(str(config_data['duration_batch']))           # duration of simulated batch [s]
-        self.dur_fft = eval(str(config_data['duration_fft']))               # duration of FFT segment [s]
+        self.ti = 0                                        # index running through input noise batch
+        self.pumP_2_tstP_sos_state = np.zeros((2, 3, 2))
+        self.tstP2P_sos_state = np.zeros((2, 3, 2))
+        self.high_pass_sos_state = np.zeros((1, 2))
 
-        # time series of laser power
-        self.power_tt = (1+utils.noise_from_sqrt_psd([config_data['RIN']], self.fs, self.dur_batch, self._rng_state)) * self.P_av
-        if plot_dir:
-            plotting.plot_psd(self.power_tt / self.P_av, self.dur_fft, self.fs,
-                              os.path.join(plot_dir, 'RIN_spectrum.png'),
-                              ylabel='Relative input power fluctuations [Hz$^{-1/2}$]')
+        self.P = physics['P']
+        self.L = physics['L']
+        self.R_ITM = physics['R_ITM']
+        self.R_ETM = physics['R_ETM']
+        self.t_ITM = physics['t_ITM']
+        self.lambda0 = 1064*1e-9
 
-        self.P = 0.                 # instantaneous power (unidirectional) [W]
-        self.out = None             # output value of this components
-        self.input_ch = []          # names of input channels
-        self.output_ch = {'power': 0}   # names of output channels
+        self.scale_ITM_ISI_L = float(parameters['scale_ITM_ISI_L'])
+        self.scale_ETM_ISI_L = float(parameters['scale_ETM_ISI_L'])
+        self.scale_OSEM_L = float(parameters['scale_OSEM_L'])
+        self.scale_OSEM_P = float(parameters['scale_OSEM_P'])
+        self.scale_RIN = float(parameters['scale_RIN'])
 
-        self.ti = 0  # index running through input noise batch
+        self.set_models(plot_dir=plot_dir)                          # definition of state-space models
+        self.read_noise_from_top(noise_files, plot_dir)             # read models for test-mass pitch noise from ISI/TOP OSEMs
+        self.read_sus_transfer_functions(transfer_files, plot_dir)  # read transfer functions ISI/TOP -> TST
+        self.create_tst_noise_from_top(plot_dir)                    # create batch of test-mass pitch noise from ISI/TOP OSEMs
+        self.read_optical_noise(noise_files, reference_data_file, plot_dir)
+        self.calculate_torque()
+        self.initialize_parameters()
+        self.high_pass()
+        self.calculate_cavity_power()
 
-    def setIO(self, ii_in, ii_out):
-        self.output_ch['power'] = ii_out
+    def initialize_parameters(self):
 
-    def step(self):
-        self.P = self.power_tt[self.ti]
-        self.ti += 1
+        self.rho_ITM = np.sqrt(1 - self.t_ITM)
+        self.g1 = 1 - self.L / self.R_ITM
+        self.g2 = 1 - self.L / self.R_ETM
+        self.r = 0.5 * (self.g1 - self.g2 + np.sqrt((self.g1 - self.g2) ** 2 + 4))
 
-        self.out = self.P
+        coeffic = self.L / (1 - self.g1 * self.g2)
+        self.bs_matrix = coeffic * np.array([[self.g2, 1], [1, self.g1]])  # matrix that connects beam spots with local angles
+
+        self.dL_2_strain = np.sqrt(2.)/self.L  # differential displacement to strain noise coefficient
+
 
     def reset_counters(self):
         self.ti = 0
 
-    def substitute_names_by_variables(self, comp):
-        pass   # do nothing
+    def read_optical_noise(self, files, reference_data_file, plot_dir):
+        power_psd = genfromtxt(files[4], delimiter=',')
+
+        frequencies = np.linspace(0, self.fs // 2, self.T_batch * self.fs // 2 + 1)
+
+        delta_freq = 1. / self.T_batch
+        norm = 0.5 * (1. / delta_freq) ** 0.5
+
+        # Fourier amplitudes of white noise
+        re = self._rng_state.normal(0, norm, len(frequencies))
+        im = self._rng_state.normal(0, norm, len(frequencies))
+        wtilde = re + 1j * im
+
+        rpsd = np.interp(frequencies, power_psd[:, 0], self.scale_RIN*power_psd[:, 1], left=0, right=0)
+        ctilde = wtilde * rpsd
+
+        # set DC = 0
+        ctilde[0] = 0
+
+        self.input_power = np.fft.irfft(ctilde) * self.fs
+        self.input_power = (1 + np.array(self.input_power)) * self.P
+
+        if plot_dir:
+            plot_psd(self.input_power / self.P, self.T_fft, self.fs, ylabel='Relative input power fluctuations [Hz$^{-1/2}$]',
+                     filename=os.path.join(plot_dir, 'psd_of_input_power.png'))
+
+        
+        # sensitivity of AdV LIGO +
+        dn = pd.read_csv(reference_data_file,
+                     names=['ff', 'susT', 'coatT', 'quantum', 'aplus'], delimiter=' ', skipinitialspace=True)
+        ff = np.array(dn[['ff']].values.flatten())
+        aplus = np.array(dn[['aplus']].values.flatten())
+
+        # Fourier amplitudes of white noise
+        re = self._rng_state.normal(0, norm, len(frequencies))
+        im = self._rng_state.normal(0, norm, len(frequencies))
+        wtilde = re + 1j * im
+
+        rpsd_sens = np.interp(frequencies, ff, aplus, left=0, right=0)
+        ctilde_sens = wtilde * rpsd_sens
+
+        # set DC = 0
+        ctilde_sens[0] = 0
+
+        self.sensitivity = np.fft.irfft(ctilde_sens) * self.fs
 
 
-class Beam:
-    def __init__(self, config_data, seed=None, plot_dir=False):
-        self._rng_state = np.random.RandomState(seed=seed)
-        utils.log_attributes(self, dict(seed=seed))
+    def read_noise_from_top(self, files, plot_dir):
+        units = ['m', 'm', 'm', 'rad']
 
-        self.angle_to_bs = []                               # matrix mapping angular to beam-spot motion
-        self.local_to_eigen = []                            # matrix mapping angular motion from local to eigenmode
-        self.eigen_to_local = []                            # matrix mapping angular motion from eigenmode to local
-        self.dydth_soft = []                                # pitch to beamspot, soft mode
-        self.dydth_hard = []                                # pitch to beamspot, hard mode
-        self.high_pass_sos = []                             # high-pass filter to mimic length control
-        self.high_pass_sos_state = []                       # initial conditions cascaded filter delays
-        self.wavelength = []                                # wave length of the laser [m]
+        self.ns = []
+        for k in np.arange(4):
+            dn = pd.read_csv(files[k], names=['ff', 'rPSD'], delimiter=' ', skipinitialspace=True)
+            ff = np.array(dn[['ff']].values.flatten())
+            rpsd = np.array(dn[['rPSD']].values.flatten())
 
-        self.m1 = []                                                # first mirror connected to beam
-        self.m2 = []                                                # second mirror connected to beam
+            # Use only the basename (no "noise_inputs/" prefix) for plotting
+            base = os.path.basename(files[k])            # e.g. "ASD_R0_nominal.csv"
+            name, _ = os.path.splitext(base)             # -> "ASD_R0_nominal"
 
-        self.name = config_data['name']                                     # name of beam
-        self.type = config_data['type']                                     # type of component (Sensor)
-        self.BS_offset = np.array(eval(str(config_data['BS_offset'])))      # intentional beam-spot offset [m]
-        self.L = eval(str(config_data['length']))                           # length of the beam [m]
-        self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
+            self.ns.append({'name': name, 'ff': ff, 'rPSD': rpsd, 'unit': units[k]})
 
-        self.BS = np.array([0., 0.])    # beam spots [m]
-        self.P = 0.                     # instantaneous power (bidirectional) [W]
-        self.P_av = 0.                  # running average of beam power [W]
-        self.dL = 0.                    # instantaneous arm-length change [m]
-        self.ti = 0                     # index running through input noise batch
-        self.N = 1.                     # norm for running average of cavity power
-        self.out = None                 # output value of this components
+            if plot_dir:
+                plt.figure()
+                plt.loglog(ff, rpsd)
+                plt.xlim(0.1, 100)
+                plt.xlabel('Frequency [Hz]')
+                plt.ylabel('Model spectrum, {0} [{1}]'.format(name, units[k]+'/$\sqrt{\\rm Hz}$'))
+                plt.grid(True, which='both')
+                plt.tight_layout()
+                plt.savefig(os.path.join(plot_dir, name + '.png'), dpi=300)
+                plt.close()
 
-        self.high_pass()
 
-        self.input_ch = {'pitch': 0, 'power': 0}    # names of input channels
-        self.output_ch = {'torque': 0}              # names of output channels
 
-    def setIO(self, ii_in, ii_out):
-        self.input_ch['pitch'] = ii_in[0]
-        self.input_ch['power'] = ii_in[1]
-        self.output_ch['tau'] = ii_out
+    def read_sus_transfer_functions(self, files, plot_dir):
+        units = [['rad', 'm'], ['rad', 'm'], ['rad', 'm'], ['rad', 'rad']]
 
-    def set_parameters(self, m1, m2, wavelength):
-        self.m1 = m1                                                # first mirror
-        self.m2 = m2                                                # second mirror
-        self.wavelength = wavelength
+        self.tfs = []
+        for k in range(len(files)):
+            dtf = pd.read_csv(files[k], names=['ff', 'transfer'], delimiter=' ', skipinitialspace=True)
+            ff = np.array(dtf[['ff']].values.flatten())
+            tf = np.array(list(map(complex, dtf[['transfer']].values.flatten())))
 
-        g1 = 1 - self.L / self.m1.RoC
-        g2 = 1 - self.L / self.m2.RoC
-        r = 0.5 * (g1 - g2 + np.sqrt((g1-g2)**2 + 4))
+            base = os.path.basename(files[k])     # e.g. "tf_topL_2_tstP.txt"
+            name, _ = os.path.splitext(base)      # -> "tf_topL_2_tstP"
 
-        # matrix that connects beam spots with local angles
-        self.angle_to_bs = self.L / (1-g1*g2) * np.array([[g2, 1], [1, g1]])
+            self.tfs.append({'name': name, 'ff': ff, 'tf': tf, 'unit': units[k]})
 
-        # matrix that converts from local to eigenbasis of angular motion
-        self.local_to_eigen = np.array([[1, r], [-r, 1]]) / (1 + r**2)
+            if plot_dir:
+                plt.figure()
+                plt.loglog(ff, np.abs(tf))
+                plt.xlim(0.1, 100)
+                plt.xlabel('Frequency [Hz]')
+                plt.ylabel(name+' ['+units[k][0]+'/'+units[k][1]+']')
+                plt.grid(True, which='both')
+                plt.tight_layout()
+                plt.savefig(os.path.join(plot_dir, name + '.png'), dpi=300)
+                plt.close()
 
-        # matrix that converts from eigenbasis to local angular motion
-        self.eigen_to_local = np.array([[1, -r], [r, 1]])
 
-        # conversion from soft/hard angular motion to beam-spot motion on mirrors
-        # [note that I introduced a change of sign assuming that these components come from eigen_to_local*angle_to_bs]
-        self.dydth_soft = (self.L/2) * ((g1+g2) + np.sqrt((g2-g1)**2 + 4)) / (1-g1*g2)
-        self.dydth_hard = (self.L/2) * ((g1+g2) - np.sqrt((g2-g1)**2 + 4)) / (1-g1*g2)
+
+
+    def create_tst_noise_from_top(self, plot_dir):
+
+        frequencies = np.linspace(0, self.fs//2, self.T_batch*self.fs//2+1)
+        
+        delta_freq = 1./self.T_batch
+        norm = 0.5 * (1. / delta_freq)**0.5
+
+        seismic_and_damping_scaling_parameters = np.array([self.scale_ITM_ISI_L, self.scale_ETM_ISI_L, self.scale_OSEM_L, self.scale_OSEM_P])
+
+        noises_t = np.zeros((2*(len(frequencies)-1), 6))
+        ii = np.array([0, 2, 3, 1, 2, 3])
+        for k in np.arange(6):
+            # Fourier amplitudes of white noise
+            re = self._rng_state.normal(0, norm, len(frequencies))
+            im = self._rng_state.normal(0, norm, len(frequencies))
+            wtilde = re + 1j * im
+
+            # convolve with noise root PSD (note that ss or [b,a] models lead to divergence)
+            rpsd = np.interp(frequencies, self.ns[ii[k]]['ff'], self.ns[ii[k]]['rPSD'], left=0, right=0)
+            tf = np.interp(frequencies, self.tfs[ii[k]]['ff'], self.tfs[ii[k]]['tf'], left=0, right=0)
+            ctilde = wtilde * rpsd * tf
+
+            # set DC = 0
+            ctilde[0] = 0
+
+            n_t = seismic_and_damping_scaling_parameters[ii[k]] * np.fft.irfft(ctilde) * self.fs
+            noises_t[:, k] = n_t
+
+            if plot_dir:
+                name = self.tfs[ii[k]]['name']+'x'+self.ns[ii[k]]['name']
+                unit = self.tfs[ii[k]]['unit'][0]+'/$\sqrt{\\rm Hz}$'
+
+                plot_psd(n_t, self.T_fft, self.fs,
+                        ylabel='Spectrum, {0} [{1}]'.format(name,unit), filename=os.path.join(plot_dir, name+'_S.png'))
+
+        self.tst_noise_t = np.array([np.sum(noises_t[:, :3], 1), np.sum(noises_t[:, 3:], 1)])
+
+        if plot_dir:
+            for col_idx, plot_name in [(0,"ITM"), (1, "ETM")]:
+                plot_psd(self.tst_noise_t[col_idx, :], self.T_fft, self.fs,
+                        ylabel='Test-mass pitch noise from ISI and TOP, ' + plot_name + ' [rad/$\sqrt{\\rm Hz}$]',
+                        filename=os.path.join(plot_dir, f'n_tstP_from_isi_top_S_{plot_name}.png'))
+
+
+    def set_models(self, plot_dir):
+        """
+        The following model is based on the zpk models from
+        https://alog.ligo-la.caltech.edu/aLOG/index.php?callRep=41815
+
+        The system defined here has its input at TM P (angle), which makes it possible to easily inject the
+        ISI / TOP OSEM noise in the feedback model.
+        """
+        # PUM P to TM P transfer function
+        zz = np.array([-2.107342e-01 + 2.871199e+00j, -2.107342e-01 - 2.871199e+00j])
+        pp = np.array([-1.543716e-01 + 2.727201e+00j, -1.543716e-01 - 2.727201e+00j, -8.732026e-02 + 3.492316e+00j,
+                       -8.732026e-02 - 3.492316e+00j, -3.149511e-01 + 9.411627e+00j, -3.149511e-01 - 9.411627e+00j])
+        k = 9.352955e+01
+
+        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
+        self.pumP_2_tstP_sos = signal.zpk2sos(*zpk)
+
+        # TM P to P transfer function
+        self.zz = np.array([-1.772565e-01 + 2.866176e+00j, -1.772565e-01 - 2.866176e+00j, -1.755293e-01 + 7.064508e+00j,
+                       -1.755293e-01 - 7.064508e+00j])
+        self.pp = np.array([-1.393094e-01 + 2.737083e+00j, -1.393094e-01 - 2.737083e+00j, -8.749749e-02 + 3.493148e+00j,
+                       -8.749749e-02 - 3.493148e+00j, -3.185553e-01 + 9.347665e+00j, -3.185553e-01 - 9.347665e+00j])
+
+        zpk = signal.bilinear_zpk(self.zz, self.pp, 2.567652, self.fs)
+        self.tstP2P_sos = signal.zpk2sos(*zpk)
+
+        
+        if plot_dir:
+            sos_freq_resp(self.pumP_2_tstP_sos, self.fs, os.path.join(plot_dir, f'bode_pumP_2_tstP.png'))
+            sos_freq_resp(self.tstP2P_sos, self.fs, os.path.join(plot_dir, f'bode_tstP2P.png'))
+
+        return self.zz, self.pp
 
     def high_pass(self):
-        """
-        This function is used to filter out the low-frequency content of the power fluctuations,
-        thus simulating the effect of the DARM length control.
-        """
         z, p, k = signal.ellip(2, 1., 140., 2.*np.pi*50., btype='high', analog=True, output='zpk')
-        #k *= 10.**(1./20.) # why should this factor be necessary?
+        k*=10.**(1./20.)
 
         zpk = signal.bilinear_zpk(z, p, k, self.fs)
         self.high_pass_sos = signal.zpk2sos(*zpk)
-        self.high_pass_sos_state = np.zeros((len(self.high_pass_sos[:, 0]), 2))
 
-    def step(self, pitch, input_power):
-        self.BS = self.angle_to_bs @ pitch + self.BS_offset     # beam spots
-        self.dL = np.sum(self.BS*pitch, axis=-1)                # length noise
 
-        # applying high-pass filter to mimic length control
-        dL_hp, zf = utils.faster_sosfilt(self.high_pass_sos, np.array([self.dL]), zi=self.high_pass_sos_state)
+    def calculate_cavity_power(self):
+        
+        # in case of NONLINEAR noise coupling
+        self.beam_spots = self.bs_matrix @ self.test_mass_angular_local  # arm force calculation, in local basis
+
+        # in case of LINEAR noise coupling
+        #self.beam_spots = self.bs_matrix @ self.test_mass_angular_local + self.dc_offset  # arm force calculation, in local basis
+
+        self.deltaL = np.sum(self.beam_spots*self.test_mass_angular_local, axis=-1)  # length change of arm cavity
+
+        # applying high-pass filter to length change for arm cavity power calculation
+        output, zf = faster_sosfilt(self.high_pass_sos, np.array([self.deltaL]), zi=self.high_pass_sos_state)
         self.high_pass_sos_state = zf
 
-        # power in the cavity
-        self.P = input_power * self.m1.T / np.abs(
-            1 - np.sqrt(self.m1.R) * np.sqrt(self.m2.R) * np.exp(4j * np.pi * dL_hp[0] / self.wavelength)) ** 2
+        self.deltaL_hp = output[0]
 
-        # running average of cavity power
-        self.P_av = self.P_av + 1 / self.N * (self.P - self.P_av)
-        if self.N < 1000:
+        self.cavity_power = self.input_power[self.ti] * self.t_ITM / np.abs(
+            1 - self.rho_ITM * np.exp(4j * np.pi * self.deltaL_hp / self.lambda0)) ** 2  # final power in the arm cavity
+
+        return self.cavity_power
+
+
+    def calculate_torque(self):
+
+        # calculation of radiation-pressure torques on ITM and ETM
+        # in case of NONLINEAR noise coupling:
+        torque = 2 / 299792458.0 * (self.cavity_power*self.beam_spots + self.dc_offset*(self.cavity_power - self.P_dc))
+
+        # in case of LINEAR noise coupling:
+        # torque = 2 / 299792458.0 * (self.cavity_power * self.beam_spots - self.dc_offset*self.P_dc)
+
+        torque_noise = np.zeros((2, ))
+        for i in range(2):
+            
+            output, zf = faster_sosfilt(self.tstP2P_sos, np.array([torque[i]]), zi=self.tstP2P_sos_state[i])
+            self.tstP2P_sos_state[i] = zf
+
+            torque_noise[i] = output[0]
+            
+        return torque_noise
+
+
+    def propagate(self, pum_input_signal=None, SS_comp=None):
+        self.calculate_cavity_power()
+        torque_noise = self.calculate_torque()
+
+        #ITM, ETM noises (including the optical torque noise)
+        pitch_ITM_ETM = self.tst_noise_t[:, self.ti] + torque_noise
+        self.ti += 1
+
+        if pum_input_signal is not None:
+            for i in range(2):
+
+                output, zf = faster_sosfilt(self.pumP_2_tstP_sos, np.array([pum_input_signal[i]]), zi=self.pumP_2_tstP_sos_state[i])
+                self.pumP_2_tstP_sos_state[i] = zf
+
+                # add signal from PUM P input torque
+                pitch_ITM_ETM[i] += output[0]
+        
+        # subtract signal from SS compensation path
+        self.test_mass_angular_local = pitch_ITM_ETM - SS_comp
+
+        # strain noise
+        asc_noise = self.dL_2_strain*self.deltaL                    # ASC strain noise
+        strain_noise = asc_noise + self.sensitivity[self.ti]        # total strain noise
+
+        return self.test_mass_angular_local, self.beam_spots, self.cavity_power, asc_noise, strain_noise, torque_noise
+
+
+class Sensors:
+    def __init__(self, sensing, physics, data, seed=None):
+
+        self.fs = data['sampling_frequency']
+        self.n_soft = sensing['noise_soft_mode']
+        self.n_hard = sensing['noise_hard_mode']
+
+        self.L = physics['L']
+        self.R_ITM = physics['R_ITM']
+        self.R_ETM = physics['R_ETM']
+
+        self._rng_state = np.random.RandomState(seed=seed)
+
+        self.initialize_parameters()
+
+    def initialize_parameters(self):
+
+        self.g1 = 1 - self.L / self.R_ITM
+        self.g2 = 1 - self.L / self.R_ETM
+        self.r = 0.5 * (self.g1 - self.g2 + np.sqrt((self.g1 - self.g2) ** 2 + 4))
+
+        self.local2eigen = np.array([[1, self.r], [-self.r, 1]]) / (1 + self.r ** 2)
+
+
+    def sample_readout(self, input_signal_s=np.array([0., 0.])):
+
+        read_out = self.local2eigen @ input_signal_s
+        read_out[0] += self._rng_state.normal(0, (self.fs/2.)**0.5 * self.n_soft)
+        read_out[1] += self._rng_state.normal(0, (self.fs/2.)**0.5 * self.n_hard)
+
+        return read_out
+
+
+class SS_compensation:
+    
+    def __init__(self, data, physics, asc_plant, plot_dir):
+
+        self.fs = data['sampling_frequency']
+        self.L = physics['L']
+        self.R_ITM = physics['R_ITM']
+        self.R_ETM = physics['R_ETM']
+        self.P_const = 56700
+        self.Pav = 0
+        self.N = 1
+        self.zz, self.pp = asc_plant.set_models(plot_dir)
+        self.initialize_parameters()
+
+    def initialize_parameters(self):
+
+        self.g1 = 1 - self.L / self.R_ITM
+        self.g2 = 1 - self.L / self.R_ETM
+        self.r = 0.5 * (self.g1 - self.g2 + np.sqrt((self.g1 - self.g2) ** 2 + 4))
+        self.eigen2local = np.array([[1, -self.r], [self.r, 1]])
+
+        self.dydth_soft = (self.L / 2) * ((self.g2 + self.g1) + np.sqrt((self.g2 - self.g1) ** 2 + 4)) / (self.g1*self.g2 - 1)
+        self.dydth_hard = (self.L / 2) * ((self.g2 + self.g1) - np.sqrt((self.g2 - self.g1) ** 2 + 4)) / (self.g1*self.g2 - 1)
+
+        self.zz_lp, self.pp_lp, self.kk_lp=signal.ellip(2, 1., 40., 2.*np.pi*17., analog=True, output='zpk')
+        self.kk_lp*=10.**(1./20.)
+
+        self.z_ss = np.hstack([self.zz, self.zz_lp])
+        self.p_ss = np.hstack([self.pp, self.pp_lp])
+
+        self.global_sos_state = np.zeros((2, 4, 2))
+
+    def sample_compensation(self, cavity_power = 0., input_signal=np.array([0., 0.])):
+
+        self.Pav = self.Pav+1/self.N*(cavity_power[0]-self.Pav)
+        if self.N<1000:
             self.N += 1
 
-        # radiation-pressure torques
-        torque_dc = 2 / 299792458.0 * self.P_av * self.BS_offset
-        self.out = 2 / 299792458.0 * self.P * (self.BS+self.BS_offset) - torque_dc
+        F = (-1)*np.array([1, 1 - self.P_const/self.Pav])     # gain-adjustment factor
 
-        self.ti += 1
+        r_s = F[0] * 2 * self.Pav / 299792458. * self.dydth_soft
+        k_s = 2.567652*r_s
+        r_h = F[1] * 2 * self.Pav / 299792458. * self.dydth_hard
+        k_h = 2.567652*r_h
 
-    def reset_counters(self):
-        self.ti = 0
+        k_ss_soft = k_s*self.kk_lp
+        k_ss_hard = k_h*self.kk_lp
 
-    def substitute_names_by_variables(self, comp):
-        pass   # do nothing
+        zpk_soft = signal.bilinear_zpk(self.z_ss, self.p_ss, k_ss_soft, self.fs)
+        ss_soft_sos = signal.zpk2sos(*zpk_soft)
 
+        zpk_hard = signal.bilinear_zpk(self.z_ss, self.p_ss, k_ss_hard, self.fs)
+        ss_hard_sos = signal.zpk2sos(*zpk_hard)
 
-class Mirror:
-    def __init__(self, config_data, seed=None, plot_dir=False):
-        self._rng_state = np.random.RandomState(seed=seed)
-        utils.log_attributes(self, dict(seed=seed))
+        ss_global_sos = [ss_soft_sos, ss_hard_sos]
 
-        self.name = config_data['name']                                     # name of mirror
-        self.type = config_data['type']                                     # type of component (Sensor)
-        self.RoC = eval(str(config_data['RoC']))                            # mirror radius of curvature [m]
-        self.T = eval(str(config_data['T']))                                # power transmissivity
-        self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
-        self.T_batch = eval(str(config_data['duration_batch']))             # duration of simulated batch [s]
-        self.T_fft = eval(str(config_data['duration_fft']))                 # duration of simulated batch [s]
+        torque_noise_SS = np.zeros((2, ))
 
-        # response functions as second-order sections
-        self.rad_to_angle_sos = []
-        self.act_to_angle_sos = []
+        for i in range(2):
 
-        self.rad_to_angle_sos_state = []                                    # initial conditions cascaded filter delays
-        self.act_to_angle_sos_state = []                                    # initial conditions cascaded filter delays
+            output, zf = faster_sosfilt(ss_global_sos[i], np.array([input_signal[i]]), zi=self.global_sos_state[i])
+            self.global_sos_state[i] = zf
 
-        # time series of noise from suspensions (e.g., platform + damping loop)
-        self.sus_noise_tt = utils.noise_from_sqrt_psd(config_data['sus_noise'], self.fs, self.T_batch, self._rng_state)
+            torque_noise_SS[i] = output[0]
 
-        self.ti = 0             # index running through input noise batch
-        self.P = 0              # current pitch angle [rad]
-        self.out = None         # output value of this components
-        self.R = 1 - self.T     # power reflectivity
+        return self.eigen2local @ torque_noise_SS
 
-        self.set_sos_models(config_data, plot_dir)
-
-        if plot_dir:
-            plotting.plot_psd(self.sus_noise_tt, self.T_fft, self.fs, os.path.join(plot_dir, 'sus_spectrum.png'),
-                              ylabel='Suspension noise, TM P [rad/Hz$^{1/2}$]')
-
-    def set_sos_models(self, config_data, plot_dir):
-        zz = np.array([eval(str(comp)) for comp in config_data['act_to_angle'][0]])
-        pp = np.array([eval(str(comp)) for comp in config_data['act_to_angle'][1]])
-        k = eval(str(config_data['act_to_angle'][2][0]))
-
-        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
-        self.act_to_angle_sos = signal.zpk2sos(*zpk)
-        self.act_to_angle_sos_state = np.zeros((len(self.act_to_angle_sos[:, 0]), 2))
-
-        zz = np.array([eval(str(comp)) for comp in config_data['rad_to_angle'][0]])
-        pp = np.array([eval(str(comp)) for comp in config_data['rad_to_angle'][1]])
-        k = eval(str(config_data['rad_to_angle'][2][0]))
-
-        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
-        self.rad_to_angle_sos = signal.zpk2sos(*zpk)
-        self.rad_to_angle_sos_state = np.zeros((len(self.rad_to_angle_sos[:, 0]), 2))
-
-        if plot_dir:
-            plotting.sos_freq_resp(self.act_to_angle_sos, self.fs, os.path.join(plot_dir, f'bode_act_to_angle.png'))
-            plotting.sos_freq_resp(self.rad_to_angle_sos, self.fs, os.path.join(plot_dir, f'bode_rad_to_angle.png'))
-
-    def step(self, rad_torque=0., act_upper_stage=0., act_mirror=0.):
-
-        # angular motion from radiation-pressure torque acting on mirror
-        angle_torque_mirror, zf = utils.faster_sosfilt(self.rad_to_angle_sos, np.array([rad_torque+act_mirror]),
-                                                       zi=self.rad_to_angle_sos_state)
-        self.rad_to_angle_sos_state = zf
-
-        # angular motion from angular controls acting on upper suspension stage
-        angle_torque_upper, zf = utils.faster_sosfilt(self.act_to_angle_sos, np.array([act_upper_stage]),
-                                                      zi=self.act_to_angle_sos_state)
-        self.act_to_angle_sos_state = zf
-
-        # add inputs to angular motion (contains radiation-pressure compensation)
-        self.P = self.sus_noise_tt[self.ti] + angle_torque_mirror[0] + angle_torque_upper[0]
-        self.out = self.P
-
-        self.ti += 1
-
-    def reset_counters(self):
-        self.ti = 0
-
-    def substitute_names_by_variables(self, comp):
-        self.ti = self.ti   # do nothing
-
-
-class Sensor:
-    def __init__(self, config_data, seed=None, plot_dir=False):
-        self._rng_state = np.random.RandomState(seed=seed)
-        utils.log_attributes(self, dict(seed=seed))
-
-        self.name = config_data['name']                                     # name of sensor
-        self.type = config_data['type']                                     # type of component (Sensor)
-        self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
-        self.T_batch = eval(str(config_data['duration_batch']))             # duration of simulated batch [s]
-        self.T_fft = eval(str(config_data['duration_fft']))                 # duration of FFT segment [s]
-        self.matrix = config_data['matrix']                                 # matrix mapping input channels to signals
-
-        # produce time series of sensor noise
-        self.readout_noise_tt = []
-        noise_files = config_data['readout_noise'].split(',')
-        self.readout_noise_tt = np.vstack((
-            utils.noise_from_sqrt_psd([noise_files[0].strip()], self.fs, self.T_batch, self._rng_state),
-            utils.noise_from_sqrt_psd([noise_files[1].strip()], self.fs, self.T_batch, self._rng_state)))
-
-        self.ti = 0                     # index running through input noise batch
-        self.linked_components = {}
-        self.out = None                 # output value of this components
-
-        if plot_dir:
-            plotting.plot_psd(self.readout_noise_tt[0], self.T_fft, self.fs,
-                              os.path.join(plot_dir, 'readout_noise_soft_spectrum'),
-                              ylabel='Readout noise, soft mode [rad/Hz$^{1/2}$]')
-            plotting.plot_psd(self.readout_noise_tt[1], self.T_fft, self.fs,
-                              os.path.join(plot_dir, 'readout_noise_hard_spectrum'),
-                              ylabel='Readout noise, hard mode [rad/Hz$^{1/2}$]')
-
-    def step(self, dof):
-        self.out = eval(self.matrix) @ dof + self.readout_noise_tt[:, self.ti]
-        self.ti += 1
-
-    def reset_counters(self):
-        self.ti = 0
-
-    def substitute_names_by_variables(self, comp):
-        if isinstance(self.matrix, str) and self.matrix.find(comp.name) != -1:
-            self.linked_components[comp.name] = comp
-            self.matrix = self.matrix.replace(comp.name, 'self.linked_components[\''+comp.name+'\']')
-        elif not isinstance(self.matrix, str) and len(self.matrix) > 1:
-            for k1 in range(len(self.matrix)):
-                for k2 in range(len(self.matrix[k1])):
-                    if isinstance(self.matrix[k1][k2], str) and self.matrix[k1][k2].find(comp.name) != -1:
-                        self.linked_components[comp.name] = comp
-                        self.matrix[k1][k2] = self.matrix[k1][k2].replace(comp.name, 'self.linked_components[\''+comp.name+'\']')
+    """def sample_compensation(self, asc_plant, input_signal=np.array([0., 0.])):
+        return np.array([0., 0.])"""
 
 
 class Controller:
-    """
-    to-do: change so that it can be an arbitrary MIMO controller (only works for NxN MIMO at the moment)
-    """
-    def __init__(self, config_data, seed=None, plot_dir=False):
-        self._rng_state = np.random.RandomState(seed=seed)
-        utils.log_attributes(self, dict(seed=seed))
 
-        self.name = config_data['name']                                     # name of controller
-        self.type = config_data['type']                                     # type of component (Sensor)
-        self.fs = eval(str(config_data['simulation_sampling_frequency']))   # sampling frequency [Hz]
-        self.T_batch = eval(str(config_data['duration_batch']))             # duration of simulated batch [s]
-        self.matrix = config_data['matrix']                                 # actuation matrix
+    def __init__(self, data, physics, plot_dir, controller_name="C0_nominal"):
 
-        # control filter as second-order sections
-        self.controller_sos = []
-        self.controller_sos_state = []
+        self.fs = data['sampling_frequency']
 
-        self.actuation = np.zeros((2, 1))
+        self.L = physics['L']
+        self.R_ITM = physics['R_ITM']
+        self.R_ETM = physics['R_ETM']
 
-        self.set_sos_models(config_data, plot_dir)
-        self.act_point = 'sus' if 'SUS' in config_data['output'] else 'mirror'
-        self.ti = 0                                                 # index running through input noise batch
-        self.linked_components = {}
-        self.out = None                                             # output value of this components
+        # which hard-mode controller variant we are using
+        self.controller_name = controller_name
 
-    def set_sos_models(self, config_data, plot_dir):
-        zz = np.array([eval(str(comp)) for comp in config_data['filter'][0][0]])
-        pp = np.array([eval(str(comp)) for comp in config_data['filter'][0][1]])
-        k = eval(str(config_data['filter'][0][2][0]))
+        self.soft_control_sos_state = np.zeros((7, 2))
+        self.hard_control_sos_state = np.zeros((10, 2))
 
-        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
-        soft_sos = signal.zpk2sos(*zpk)
+        # bumpless-handover state (populated by switch_hard); _ramp_left==0 => no ramp in progress
+        self._ramp_left = 0
+        self._ramp_total = 1
+        self._prev_hard_sos = None
+        self._prev_hard_state = None
 
-        zz = np.array([eval(str(comp)) for comp in config_data['filter'][1][0]])
-        pp = np.array([eval(str(comp)) for comp in config_data['filter'][1][1]])
-        k = eval(str(config_data['filter'][1][2][0]))
-        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
-        hard_sos = signal.zpk2sos(*zpk)
+        self.initialize_parameters()
+        self.set_feedback_filter_soft(plot_dir)
+        self.set_feedback_filter_hard(plot_dir)
 
-        self.controller_sos = [soft_sos, hard_sos]
-        self.controller_sos_state = [np.zeros((len(soft_sos[:, 0]), 2)), np.zeros((len(hard_sos[:, 0]), 2))]
+    def initialize_parameters(self):
 
-        if plot_dir:
-            plotting.sos_freq_resp(soft_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_soft.png'))
-            plotting.sos_freq_resp(hard_sos, self.fs, os.path.join(plot_dir, 'bode_'+self.name+'_hard.png'))
+        self.g1 = 1 - self.L / self.R_ITM
+        self.g2 = 1 - self.L / self.R_ETM
+        self.r = 0.5 * (self.g1 - self.g2 + np.sqrt((self.g1 - self.g2) ** 2 + 4))
 
-    def set_controller_variant(self, config_data, variant_name, plot_dir=False):
-        """
-        Dynamically cross-fades explicit mathematical variants over the physical filter logic (e.g. C0_nominal, C1_high_micro).
-        Used organically by the Bandit algorithm to hot-swap controller states online.
-        Maintains the existing running state history without zeroing delays, unless inherently overridden by SOS shape swaps.
-        """
-        if variant_name in config_data:
-            variant_config = config_data[variant_name]
-            # Temporarily override layout schema to generate matching SOS logic cleanly
-            original_filter = config_data['filter']
-            config_data['filter'] = variant_config['filter']
-            self.set_sos_models(config_data, plot_dir)
-            config_data['filter'] = original_filter
-        else:
-            print(f"Warning: Variant {variant_name} not found in config for {self.name}")
-
-    def get_sos_for_numba(self):
-        """
-        Extracts contiguous hardware-level arrays of the SOS logic and memory state arrays to feed Numba JIT kernels.
-        ADVANCED FEATURE: Utilizes `.astype(np.float64, copy=False)` or raw property pass-through to ensure the kernel
-        modifies the EXACT physical memory space used by the `Controller` object. Prevents deep loops from "amnesia"
-        clearing historical controller delay lines which would manifest strictly as massive ringing for high-gain loops.
-        """
-        return (
-            np.ascontiguousarray(self.controller_sos[0].astype(np.float64, copy=False)),
-            np.ascontiguousarray(self.controller_sos_state[0]),
-            np.ascontiguousarray(self.controller_sos[1].astype(np.float64, copy=False)),
-            np.ascontiguousarray(self.controller_sos_state[1])
-        )
-
-    def step(self, control_in):
-        for i in range(len(control_in)):
-            output, zf = utils.faster_sosfilt(self.controller_sos[i], np.array([control_in[i]]), zi=self.controller_sos_state[i])
-            self.controller_sos_state[i] = zf
-            self.actuation[i] = output[0]
-
-        self.ti += 1
-
-        if isinstance(self.matrix, str):
-            matrix_num = eval(str(self.matrix))
-        else:
-            matrix_num = np.zeros_like(self.matrix, dtype=float)
-            for k1 in range(len(self.matrix)):
-                for k2 in range(len(self.matrix[k1])):
-                    matrix_num[k1, k2] = eval(str(self.matrix[k1][k2]))
-
-        self.out = -(matrix_num @ self.actuation).flatten()
+        self.eigen2local = np.array([[1, -self.r], [self.r, 1]])
 
     def reset_counters(self):
-        self.ti = 0
+        pass
 
-    def substitute_names_by_variables(self, comp):
-        if isinstance(self.matrix, str) and self.matrix.find(comp.name) != -1:
-            self.linked_components[comp.name] = comp
-            self.matrix = self.matrix.replace(comp.name, 'self.linked_components[\'' + comp.name + '\']')
-        elif not isinstance(self.matrix, str) and len(self.matrix) > 1:
-            for k1 in range(len(self.matrix)):
-                for k2 in range(len(self.matrix[k1])):
-                    if isinstance(self.matrix[k1][k2], str) and self.matrix[k1][k2].find(comp.name) != -1:
-                        self.linked_components[comp.name] = comp
-                        self.matrix[k1][k2] = self.matrix[k1][k2].replace(comp.name,
-                                                                          'self.linked_components[\'' + comp.name + '\']')
+    def set_feedback_filter_soft(self, plot_dir):
+        # Example: ASC feedback filter used 2019(?) at LIGO for soft mode
+
+        dc_gain = 20.0
+
+        ## optical response in [ct/rad]
+        K_opt = 10419.
+
+        l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+        factor = dc_gain * K_opt * l2_ct2tau
+
+        ## ctrl
+        zz_ctrl = np.array([-0.88 + 8.75j, -0.88 - 8.75j, -1.885])
+        pp_ctrl = np.array([-46 + 100j, -46 - 100j, -39.2 + 111j, -39.2 - 111j])
+        k_ctrl = 26305469482
+
+        z_lp, p_lp, k_lp = signal.ellip(4, 1, 30, 2. * np.pi * 14, analog=True, output='zpk')
+        k_lp *= 10. ** (1. / 20.)
+
+        # first set of zpk's
+        zz_ctrl_fin = np.hstack([zz_ctrl, z_lp])
+        pp_ctrl_fin = np.hstack([pp_ctrl, p_lp])
+        k_ctrl_fin = k_ctrl*k_lp
+
+        ## low-pass
+        zz, pp, k = signal.ellip(2, 1, 10, 2. * np.pi * 8, analog=True, output='zpk')
+
+        zzlp = np.array([-4.45 + 8.31j, -4.45 - 8.31j])
+        pplp = np.array([-7.06 + 6.245j, -7.06 - 6.245j])
+        kklp = 1
+
+        # second set of zpk's
+        zz_lp_fin = np.hstack([zz, zzlp])
+        pp_lp_fin = np.hstack([pp, pplp])
+        k_fin = k * 10. ** (1. / 20.)
+
+        ## boost
+        zz_boost = np.array([-1.07 + 2.75j, -1.07 - 2.75j])
+        pp_boost = np.array([-0.27 + 2.94j, -0.27 - 2.94j])
+        k_boost = factor
+
+        zz_final = np.hstack([zz_ctrl_fin, zz_lp_fin, zz_boost])
+        pp_final = np.hstack([pp_ctrl_fin, pp_lp_fin, pp_boost])
+        gain_soft = k_ctrl_fin*k_fin*k_boost
+
+        zpk = signal.bilinear_zpk(zz_final, pp_final, gain_soft, self.fs)
+        self.soft_control_sos = signal.zpk2sos(*zpk)
+
+        if plot_dir:
+            sos_freq_resp(self.soft_control_sos, self.fs, os.path.join(plot_dir, 'bode_feedback_soft.png'))
 
 
-def run(system, simulation):
-    system.reset_counters()
+    def set_feedback_filter_hard(self, plot_dir):
+        # Example: ASC feedback filter used 2019(?) at LIGO for hard mode
 
-    n_samples = eval(str(simulation['duration_batch']))*eval(str(simulation['simulation_sampling_frequency']))
+        # --- choose parameters based on controller_name ---
+        name = self.controller_name
 
-    inputs = {'pitch': np.zeros((2, )), 'in_power': 0., 'readout': np.zeros((2, )), 'rad_torque': np.zeros((2, )),
-              'act_mirror': np.zeros((2, )), 'act_sus': np.zeros((2, ))}
+        if name == "C0_nominal":
+            # original nominal controller
+            dc_gain = 30.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
 
-    cavity_power_tt = np.zeros((n_samples, ))
-    actuation_tt = np.zeros((n_samples, 2))
-    pitch_tt = np.zeros((n_samples, 2))
-    beam_spot_tt = np.zeros((n_samples, 2))
-    readout_tt = np.zeros((n_samples, 2))
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
 
-    beam = system.components[2]
-    for k in tqdm.tqdm(range(n_samples-1), disable=not sys.stdout.isatty()):
+            use_boost = True
 
-        outputs = system.step(inputs)
+        elif name == "C1_high_micro":
+            dc_gain = 44.20
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
 
-        cavity_power_tt[k] = beam.P
-        beam_spot_tt[k, :] = beam.BS
-        pitch_tt[k, :] = outputs['pitch']
-        readout_tt[k, :] = outputs['readout']
-        actuation_tt[k, :] = outputs['act_sus']
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
 
-        inputs = outputs.copy()
+            use_boost = True
 
-        if simulation['loop'] == 'open':
-            inputs['act_sus'] = np.zeros((2,))
-            inputs['act_mirror'] = np.zeros((2,))
+        elif name == "C2_high_micro2":
+            dc_gain = 50.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
 
-        if np.all(np.abs(outputs['pitch'][0]) > 1):
-            print('Diverging time series at', np.round(100.*k/n_samples), '%')
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        else:
+            # fallback to nominal if unknown name
+            dc_gain = 30.0
+            K_opt = 4.44e10
+            l2_ct2tau = 7.629e-5 * 0.268e-3 * 0.0309
+
+            zz_ctrl = np.array([-0.3436+4.11j, -0.3436-4.11j,
+                                -0.7854+9.392j, -0.7854-9.392j])
+            pp_ctrl = np.array([-78.77+171.25j, -78.77-171.25j,
+                                -0.062832, -628.32])
+            k_ctrl = 5797.86
+
+            use_boost = True
+
+        # --- rest is exactly our old code, using dc_gain, K_opt, etc. ---
+
+        factor = dc_gain * K_opt * l2_ct2tau
+
+        ## low-pass
+        #zz_lp1, pp_lp1, k_lp1 = signal.ellip(2, 1., 40., 2. * np.pi * 10., analog=True, output='zpk')
+        #zz_lp2, pp_lp2, k_lp2 = signal.ellip(4, 1., 10., 2. * np.pi * 20., analog=True, output='zpk')
+
+        # --- per-controller shaping knobs ---
+        if name == "C0_nominal":
+            f_lp1 = 8.0
+            f_lp2 = 16.0
+            f_leak = 0.03   # Hz  (integrator pole at -2π f_leak)
+        elif name == "C1_high_micro":
+            f_lp1 = 10.0
+            f_lp2 = 20.0
+            f_leak = 0.01
+        elif name == "C2_high_micro2":
+            f_lp1 = 12.0
+            f_lp2 = 26.0
+            f_leak = 0.0    # keep near ideal integrator (or 0.003)
+        else:
+            f_lp1, f_lp2, f_leak = 10.0, 20.0, 0.01
+
+        # low-pass sections
+        zz_lp1, pp_lp1, k_lp1 = signal.ellip(2, 1., 40., 2.*np.pi*f_lp1, analog=True, output='zpk')
+        zz_lp2, pp_lp2, k_lp2 = signal.ellip(4, 1., 10., 2.*np.pi*f_lp2, analog=True, output='zpk')
+
+        # leaky integrator pole location
+        p_int = 0.0 if f_leak <= 0 else (-2.0*np.pi*f_leak)
+        z_int = -2.0*np.pi*0.1  # keep your zero if you want the same high-pass-ish shaping
+
+
+        if use_boost:
+            ## boost
+            zz_boost = np.array([-0.322 + 0.299j, -0.322 - 0.299j,
+                                 -0.786 + 0.981j, -0.786 - 0.981j,
+                                 -1.068 + 2.753j, -1.068 - 2.753j,
+                                 -1.53 + 4.13j, -1.53 - 4.13j])
+            pp_boost = np.array([-0.161 + 0.409j, -0.161 - 0.409j,
+                                 -0.313 + 1.217j, -0.313 - 1.217j,
+                                 -0.268 + 2.941j, -0.268 - 2.941j,
+                                 -0.24 + 4.39j, -0.24 - 4.39j])
+            k_boost = factor
+        else:
+            zz_boost = np.array([])
+            pp_boost = np.array([])
+            k_boost = 1.0  # neutral multiplier
+
+        zz_final = np.hstack([zz_ctrl, [z_int], zz_lp1, zz_lp2, zz_boost])
+        pp_final = np.hstack([pp_ctrl, [p_int], pp_lp1, pp_lp2, pp_boost])
+
+        gain_hard = k_ctrl * k_lp1 * k_lp2 * k_boost
+
+        """zz_final = np.hstack([zz_ctrl, [-2. * np.pi * 0.1], zz_lp1, zz_lp2, zz_boost])
+        pp_final = np.hstack([pp_ctrl, [0], pp_lp1, pp_lp2, pp_boost])
+        gain_hard = k_ctrl*k_lp1*k_lp2*k_boost"""
+
+
+
+
+        zpk = signal.bilinear_zpk(zz_final, pp_final, gain_hard, self.fs)
+        self.hard_control_sos = signal.zpk2sos(*zpk)
+
+        self.global_control_sos = [self.soft_control_sos, self.hard_control_sos]
+        self.global_control_sos_state = [self.soft_control_sos_state, self.hard_control_sos_state]
+
+        if plot_dir:
+            sos_freq_resp(self.hard_control_sos, self.fs,
+                          os.path.join(plot_dir, f'bode_feedback_hard_{name}.png'))
+
+
+    def sample_feedback(self, input_signal=np.array([0., 0.])):
+
+        out_soft, self.global_control_sos_state[0] = faster_sosfilt(
+            self.global_control_sos[0], np.array([input_signal[0]]), zi=self.global_control_sos_state[0])
+        out_hard, self.global_control_sos_state[1] = faster_sosfilt(
+            self.global_control_sos[1], np.array([input_signal[1]]), zi=self.global_control_sos_state[1])
+
+        u_soft = out_soft[0]
+        u_hard = out_hard[0]
+
+        # bumpless handover: after switch_hard(), cross-fade the applied hard actuation from the
+        # previous controller (kept running) to the new one over the ramp window. At the switch
+        # instant the output equals the previous controller's (no discontinuity); it slews to the
+        # new controller as the ramp completes.
+        if self._ramp_left > 0:
+            out_prev, self._prev_hard_state = faster_sosfilt(
+                self._prev_hard_sos, np.array([input_signal[1]]), zi=self._prev_hard_state)
+            alpha = 1.0 - self._ramp_left/self._ramp_total
+            u_hard = (1.0 - alpha)*out_prev[0] + alpha*u_hard
+            self._ramp_left -= 1
+
+        return self.eigen2local @ np.array([u_soft, u_hard])
+
+    def switch_hard(self, new_controller_name, ramp_s=2.0):
+        """Bumpless switch of the hard-mode controller. The outgoing filter is kept running and
+        its output cross-faded into the incoming one over ramp_s seconds, so the actuation is
+        continuous (no impulse). This is the realistic handover; calling set_feedback_filter_hard
+        directly instead would reset the loop state (an actuator kick). The soft loop is unchanged."""
+        if new_controller_name == self.controller_name and self._ramp_left == 0:
+            return
+        live_soft = self.global_control_sos_state[0].copy()   # preserve the (unchanged) soft loop
+        prev_hard_sos = self.global_control_sos[1]
+        prev_hard_state = self.global_control_sos_state[1].copy()
+        self.controller_name = new_controller_name
+        self.set_feedback_filter_hard(plot_dir=None)          # rebuilds hard SOS; resets global state
+        self.global_control_sos_state[0] = live_soft          # restore live soft state
+        self.global_control_sos_state[1] = np.zeros((self.hard_control_sos.shape[0], 2))  # new hard: cold, warms during ramp
+        self._prev_hard_sos = prev_hard_sos
+        self._prev_hard_state = prev_hard_state
+        self._ramp_total = max(1, int(round(ramp_s*self.fs)))
+        self._ramp_left = self._ramp_total
+
+
+class FilterLP:
+
+    def __init__(self, data, low_pass):
+        self.fs = data['sampling_frequency']
+
+        f_pass = low_pass['pass-band_edge']
+        f_stop = low_pass['stop-band_edge']
+        min_att = low_pass['minimum_attenuation']
+
+        ## low-pass
+        [n, fn] = signal.ellipord(f_pass, f_stop, 1, min_att, fs=self.fs)
+        print('Filter order:',n)
+
+        zz, pp, k = signal.ellip(n, 1., min_att, 2*np.pi*fn, analog=True, output='zpk')
+        zpk = signal.bilinear_zpk(zz, pp, k, self.fs)
+        self.low_pass_sos = signal.zpk2sos(*zpk)
+        self.low_pass_sos_state = np.zeros((2, 1, 2))
+
+    def sample(self, input_signal=np.array([0., 0.])):
+
+        fin_out_lp = []
+
+        for i in range(2):
+            output, zf = faster_sosfilt(self.low_pass_sos, np.array([input_signal[i]]), zi=self.low_pass_sos_state[i])
+            self.low_pass_sos_state[i] = zf
+            
+            fin_out_lp.append(output[0])
+
+        return np.array(fin_out_lp)
+
+
+class Postprocessing:
+    """Strain noise filtering. Since the frequencies below 10 Hz and above 40 Hz would dominate during the 
+    reward process, and controls noise is relevant between 10 Hz and 25 Hz we need to whiten the strain noise
+    in order that rewards are dominated by the noise in this frequency band."""
+
+    def __init__(self, data):
+
+        self.fs = data['sampling_frequency']
+        self.band_pass()
+        self.band_pass_sos_state = np.zeros((12, 2))
+
+    def band_pass(self):
+        z1 = np.array([1 + 0j, 1 - 0j, 0.99 + 0j, 0.99 - 0j, 1.01 + 0j, 1.01 - 0j, 1 + 0j, 1 - 0j, 1 + 0j, 1 - 0j, 1 + 0j, 1 - 0j])
+        p1 = np.array([-2*np.pi*5*1 + 2*np.pi*5*1j, -2*np.pi*5*1 - 2*np.pi*5*1j, -1.99*np.pi*5*1 + 1.99*np.pi*5*1j, -1.99*np.pi*5*1 - 1.99*np.pi*5*1j,
+                    -2*np.pi*5*1 + 2*np.pi*5*1j, -2*np.pi*5*1 - 2*np.pi*5*1j, -2*np.pi*5*1 + 2*np.pi*5*1j, -2*np.pi*5*1 - 2*np.pi*5*1j, -2*np.pi*5*1 + 2*np.pi*5*1j, -2*np.pi*5*1 - 2*np.pi*5*1j,
+                    -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j, -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j,
+                    -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j, -1.99*np.pi*40*1 + 1.99*np.pi*40*1j, -1.99*np.pi*40*1 - 1.99*np.pi*40*1j,
+                    -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j, -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j, -2*np.pi*40*1 + 2*np.pi*40*1j, -2*np.pi*40*1 - 2*np.pi*40*1j])
+        k1 = 1.2e31
+
+        zpk = signal.bilinear_zpk(z1, p1, k1, self.fs)
+        self.band_pass_sos = signal.zpk2sos(*zpk)
+
+    def sample(self, strain_noise=None):
+
+        if strain_noise is not None:
+            output, zf = faster_sosfilt(self.band_pass_sos, strain_noise, zi=self.band_pass_sos_state)
+            self.band_pass_sos_state = zf
+
+        return output[0]
+
+
+def open_loop_run(asc_plant, asc_sensing, asc_SS_compensation, asc_controller, low_pass_filter, data, plot_dir):
+    asc_plant.reset_counters()
+
+    N = data['duration_batch']*data['sampling_frequency']
+
+    tstP_t = np.zeros((N, 2))
+    tstBS_t = np.zeros((N, 2))
+    readout_t = np.zeros((N, 2))
+    SS_compensation_t = np.zeros((N, 2))    # Sidles-Sigg compensation signal fed back onto test mass
+    control_t = np.zeros((N, 2))
+    low_passed_t = np.zeros((N, 2))
+    cavity_power_t = np.zeros((N, 1))
+    asc_noise_t = np.zeros((N, 1))
+    strain_noise_t = np.zeros((N, 1))
+    for k in tqdm(range(N-1)):
+        tstP_t[k+1, :], tstBS_t[k+1, :], cavity_power_t[k+1, :], asc_noise_t[k+1, :], strain_noise_t[k+1, :], _ = asc_plant.propagate(SS_comp = SS_compensation_t[k, :])
+        readout_t[k+1, :] = asc_sensing.sample_readout(input_signal_s=tstP_t[k+1, :])
+        SS_compensation_t[k+1, :] = asc_SS_compensation.sample_compensation(cavity_power = cavity_power_t[k+1, :], input_signal=readout_t[k+1, :])
+        control_t[k+1, :] = asc_controller.sample_feedback(input_signal=readout_t[k+1, :])
+        low_passed_t[k+1, :] = low_pass_filter.sample(control_t[k+1, :])
+        if np.all(np.abs(tstP_t[k+1, :]) > 1):
+            print('Diverging time series at', np.round(100.*k/N),'%')
             sys.exit(0)
 
-    return [[pitch_tt, "rad", "pitch", "Pitch (ITM/ETM)"], [cavity_power_tt, "W", "power", "Cavity power"],
-            [actuation_tt, "Nm", "actuation", "Control output (ITM/ETM)"],
-            [beam_spot_tt, "m", "beam_spot", "Beam-spot motion (ITM/ETM)"],
-            [readout_tt, "rad", "readout", "Readout (soft/hard)"]]
+    # -----------------------  Everything following here is just plotting and saving of data ----------------------
+    # plot of TST pitch motion and output of linear controller
+    for col_idx, plot_name in [(0,"ITM"), (1, "ETM")]:
+        plot_psd(tstP_t[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='TST P [rad/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'tstP_open_loop_{plot_name}.png'))
+        plot_psd(control_t[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='Control output [Nm/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'control_output_open_loop_{plot_name}.png'))
+
+    # plot of pitch motion as seen by the soft-mode and hard-mode sensors
+    for col_idx, plot_name in [(0,"soft"), (1, "hard")]:
+        plot_psd(readout_t[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='Control input [rad/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'control_input_open_loop_{plot_name}.png'))
+        
+    return tstP_t, readout_t, control_t, strain_noise_t
+
+
+def closed_loop_run(asc_plant, asc_sensing, asc_SS_compensation, asc_controller, postprocessing, data, plot_dir, reference_data_file):
+    asc_plant.reset_counters()
+
+    N = data['duration_batch']*data['sampling_frequency']
+
+    # SIGNALS THAT CAN BE OBSERVED AND USED IN A COST FUNCTION
+    strain_noise_t = np.zeros((N, 1))       # Strain noise of the GW detector
+    readout_t = np.zeros((N, 2))            # readout signals of soft- and hard-mode sensors
+    SS_compensation_t = np.zeros((N, 2))    # Sidles-Sigg compensation signal fed back onto test mass
+    control_t = np.zeros((N, 2))            # angular-control signals fed back onto the two quad suspensions
+    cavity_power_t = np.zeros((N, 1))       # light power inside the arm cavity
+
+    # AUXILIARY SIGNALS THAT CANNOT BE OBSERVED
+    tstP_t = np.zeros((N, 2))               # pitch motion of two test masses
+    tstBS_t = np.zeros((N, 2))              # beam-spot motion on two test masses
+    asc_noise_t = np.zeros((N, 1))          # only the ASC contribution to strain noise
+    whitened_strain_t = np.zeros((N, 1))    # Whitened strain noise of the GW detector, for RL reward process
+    torque_noise_t = np.zeros((N, 2))
+    for k in tqdm(range(N-1)):
+        tstP_t[k+1, :], tstBS_t[k+1, :], cavity_power_t[k+1, :], asc_noise_t[k+1, :], strain_noise_t[k+1, :], torque_noise_t[k+1, :] = asc_plant.propagate(pum_input_signal=-control_t[k, :], SS_comp = SS_compensation_t[k, :])
+
+                # --- HARD FAIL on NaN/Inf to avoid SciPy C-level crashes ---
+        if (not np.isfinite(tstP_t[k+1, :]).all() or
+            not np.isfinite(cavity_power_t[k+1, :]).all() or
+            not np.isfinite(control_t[k, :]).all()):
+            print("NaN/Inf detected at step", k+1)
+            print("tstP:", tstP_t[k+1, :])
+            print("cavity_power:", cavity_power_t[k+1, :])
+            print("control(prev):", control_t[k, :])
+            sys.exit(0)
+
+
+        readout_t[k+1, :] = asc_sensing.sample_readout(input_signal_s=tstP_t[k+1, :])
+        SS_compensation_t[k+1, :] = asc_SS_compensation.sample_compensation(cavity_power = cavity_power_t[k+1, :], input_signal=readout_t[k+1, :])
+        control_t[k+1, :] = asc_controller.sample_feedback(input_signal=readout_t[k+1, :])
+        whitened_strain_t[k+1, :] = postprocessing.sample(strain_noise = strain_noise_t[k+1, :])
+        if np.any(np.abs(tstP_t[k+1, :]) > 1) or np.any(~np.isfinite(tstP_t[k+1, :])):
+            print('Diverging time series at', np.round(100.*k/N),'%')
+            sys.exit(0)
+
+
+    # -----------------------  Everything following here is just plotting and saving of data ----------------------
+    L = 3994.5
+    R_ITM = 1934
+    R_ETM = 2245
+    dL_2_strain = np.sqrt(2.)/L
+    g1 = 1 - L / R_ITM
+    g2 = 1 - L / R_ETM
+    r = 0.5 * (g1 - g2 + np.sqrt((g1 - g2) ** 2 + 4))
+    local2eigen = np.array([[1, r], [-r, 1]]) / (1 + r ** 2)
+    
+    #N = 2*262144
+    N = 262144
+    angles_eigen = np.zeros((N, 2))
+    for k in range(N):
+        angles_eigen[k, :] = local2eigen @ tstP_t[k, :]
+
+    labels1 = ['ASC noise', 'total noise', 'total whitened noise']
+    strain_noises = np.hstack((asc_noise_t, strain_noise_t, whitened_strain_t))
+
+    # plot detector data as GW strain noise
+    plot_hoft(strain_noises, data['duration_fft'], data['sampling_frequency'],
+                reference_data_file=reference_data_file, label = labels1,
+                filename=os.path.join(plot_dir, f'StrainNoise.png'))
+
+    # plot detector data as displacement noise
+    plot_diff_disp_noise(strain_noises/dL_2_strain, data['duration_fft'], data['sampling_frequency'], label = labels1,
+                filename=os.path.join(plot_dir, f'Diff_disp_noise.png'))
+    
+
+    control_eigen = np.zeros((N, 2))
+    for k in range(N):
+        control_eigen[k, :] = local2eigen @ control_t[k, :]
+
+
+    # plot of TST pitch motion and output of linear controller
+    for col_idx, plot_name in [(0,"ITM"), (1, "ETM")]:
+        plot_psd(control_t[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='Control output [Nm/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'control_output_closed_loop_{plot_name}.png'))
+
+    # plot of pitch motion as seen by the soft-mode and hard-mode sensors
+    for col_idx, plot_name in [(0,"soft"), (1, "hard")]:
+        plot_psd(angles_eigen[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='TST P [rad/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'tstP_closed_loop_{plot_name}.png'))   
+        plot_psd(readout_t[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='Control input [rad/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'control_input_closed_loop_{plot_name}.png'))
+        plot_psd(control_eigen[:, col_idx], data['duration_fft'], data['sampling_frequency'],
+                ylabel='Control output [Nm/$\sqrt{\\rm Hz}$]', filename=os.path.join(plot_dir, f'control_output_closed_loop_{plot_name}.png'))
+    
+
+    # Save all data inside the run's plot directory
+    def save_csv(name, arr):
+        np.savetxt(os.path.join(plot_dir, name), arr, delimiter=" ")
+
+    save_csv("torque_noise_t.csv", torque_noise_t)
+    save_csv("asc_noise.csv", asc_noise_t)
+    save_csv("strain_noise.csv", strain_noise_t)
+    save_csv("whitened_strain_noise.csv", whitened_strain_t)
+    save_csv("cavity_power.csv", cavity_power_t)
+    save_csv("control_ITM_ETM.csv", control_t)
+    save_csv("SS_compensation.csv", SS_compensation_t)
+    save_csv("BSM_ITM_ETM.csv", tstBS_t)
+    save_csv("ITM_ETM_angle.csv", tstP_t)
+    save_csv("angles_eigen.csv", angles_eigen)
+    save_csv("control_input.csv", readout_t)
+
+    return tstP_t, readout_t, control_t, strain_noise_t
+

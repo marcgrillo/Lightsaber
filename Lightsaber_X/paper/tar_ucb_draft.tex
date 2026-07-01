@@ -1,0 +1,997 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm,bm}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+
+\newcommand{\A}{\mathcal A}
+\newcommand{\F}{\mathcal F}
+\newcommand{\I}{\mathcal I}
+\newcommand{\Sset}{\mathcal S}
+\newcommand{\Tset}{\mathcal T}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pp}{\mathbb P}
+\newcommand{\R}{\mathbb R}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\pos}[1]{\left[#1\right]_{+}}
+
+\title{Transition-Aware Recurrent UCB for Bandits with Recurrent Regimes and Reward-Collapse Transitions}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note defines a bandit algorithm for environments with recurrent latent regimes and non-instantaneous regime changes. The method is motivated by applications in which all arms change their mean reward when the latent regime changes, and where the transition between two stable regimes produces a marked reward drop across all arms. The proposed algorithm, called Transition-Aware Recurrent UCB (TAR-UCB), combines a regime-specific UCB rule, a one-sided global transition detector, a transition mode that prevents contamination of stable-regime estimates, and a recurrent-regime library that allows previously observed regimes to be recognized and reused. The note gives a complete mathematical specification of the algorithm, defines the relevant regret criteria, and presents proof sketches for high-probability detection, classification, and regret guarantees.
+\end{abstract}
+
+\section{Problem formulation}
+\label{sec:problem_formulation}
+
+Let
+\begin{equation}
+\label{eq:arm_set}
+\A=\{1,\ldots,K\}
+\end{equation}
+be a finite set of arms. At each round $t=1,\ldots,T$, the learner selects one arm
+\begin{equation}
+\label{eq:chosen_arm}
+A_t\in\A
+\end{equation}
+and observes only the reward of the selected arm,
+\begin{equation}
+\label{eq:observed_reward}
+Y_t\in\R .
+\end{equation}
+The learner does not observe the rewards of arms $k\neq A_t$. The history available before the decision at time $t$ is denoted by
+\begin{equation}
+\label{eq:filtration}
+\F_{t-1}
+=
+\sigma(A_1,Y_1,\ldots,A_{t-1},Y_{t-1}).
+\end{equation}
+
+The environment alternates between stable regimes and transition periods. During stable periods, the reward law is stationary conditional on a latent regime. During transitions, the reward process need not be stationary and is not treated as belonging to any stable regime. This distinction is important because transition observations should not be used to estimate the stable-regime arm means.
+
+Let
+\begin{equation}
+\label{eq:latent_regime}
+Z_t\in\{1,\ldots,S\}
+\end{equation}
+denote the latent stable regime active at time $t$, whenever $t$ belongs to a stable period. The number of distinct stable regimes $S$ is not assumed to be known by the learner. In stable regime $z$, arm $k$ has mean reward
+\begin{equation}
+\label{eq:regime_arm_mean}
+\mu_k^{(z)}
+=
+\E[Y_t\mid A_t=k,Z_t=z].
+\end{equation}
+The full mean vector of regime $z$ is
+\begin{equation}
+\label{eq:regime_mean_vector}
+\bm\mu^{(z)}
+=
+(\mu_1^{(z)},\ldots,\mu_K^{(z)})\in\R^K .
+\end{equation}
+The optimal arm in regime $z$ is
+\begin{equation}
+\label{eq:best_arm_regime}
+k^\star(z)
+\in
+\arg\max_{k\in\A}\mu_k^{(z)}.
+\end{equation}
+For simplicity, ties may be broken by the smallest index.
+
+\subsection{Stable periods}
+\label{subsec:stable_periods}
+
+During a stable period with regime $z$, the observed reward is modeled as
+\begin{equation}
+\label{eq:stable_reward_model}
+Y_t
+=
+\mu_{A_t}^{(z)}+\varepsilon_t,
+\end{equation}
+where $\varepsilon_t$ is a centered noise term. The analysis below uses the following standard concentration assumption.
+
+\begin{assumption}[Sub-Gaussian noise]
+\label{ass:subgaussian_noise}
+There exists $\sigma>0$ such that, for every stable time $t$ and every $\lambda\in\R$,
+\begin{equation}
+\label{eq:subgaussian_noise}
+\E\left[
+\exp(\lambda\varepsilon_t)
+\mid
+\F_{t-1}
+\right]
+\leq
+\exp\left(\frac{\lambda^2\sigma^2}{2}\right).
+\end{equation}
+\end{assumption}
+
+The rewards themselves may be real-valued. Assumption~\ref{ass:subgaussian_noise} is used only to obtain confidence bounds and concentration estimates. If rewards are heavy-tailed, the empirical means in the algorithm should be replaced by robust mean estimators, such as trimmed means or median-of-means estimators.
+
+\subsection{Transition periods}
+\label{subsec:transition_periods}
+
+Regime changes are not assumed to be instantaneous. Between two stable regimes, the system may pass through a transition period. The key structural property is that, during a transition, all arms experience a substantial reward drop relative to the previously active stable regime.
+
+Suppose a transition starts after a stable period in which the active regime was $z$. During the initial part of the transition, the conditional mean of each arm is assumed to be lower than its stable-regime mean by at least $d_{\min}>0$:
+\begin{equation}
+\label{eq:transition_drop_condition}
+\E[Y_t\mid A_t=k,\F_{t-1}]
+\leq
+\mu_k^{(z)}-d_{\min}
+\qquad
+\text{for all }k\in\A .
+\end{equation}
+This assumption is not a model of the whole transition trajectory. It is a detectability condition: the beginning of a transition must generate a common negative signal large enough to be statistically distinguishable from ordinary noise.
+
+The transition may later stabilize around another mean vector. TAR-UCB does not assume knowledge of the duration of the transition or of the identity of the next stable regime. The algorithm detects the drop, stops updating stable-regime statistics, waits until the reward vector stabilizes, and then classifies the new stable regime.
+
+\subsection{Recurrent regimes}
+\label{subsec:recurrent_regimes}
+
+A central feature of the setting is recurrence: a stable regime may disappear and later return. Therefore, after a regime is learned once, the learner should not relearn it from scratch every time it reappears. TAR-UCB stores a library of discovered regimes and reuses their statistics after re-identification.
+
+The distinguishability of recurrent regimes is measured by
+\begin{equation}
+\label{eq:regime_separation}
+\Delta_{\mathrm{reg}}
+=
+\min_{z\neq z'}
+\norm{\bm\mu^{(z)}-\bm\mu^{(z')}}_{\infty} .
+\end{equation}
+Reliable regime classification requires
+\begin{equation}
+\label{eq:positive_regime_separation}
+\Delta_{\mathrm{reg}}>0.
+\end{equation}
+If two regimes have the same mean vector, then no algorithm based only on rewards can distinguish them.
+
+For each regime $z$ and arm $k$, define the suboptimality gap
+\begin{equation}
+\label{eq:arm_gap}
+\Delta_k^{(z)}
+=
+\mu_{k^\star(z)}^{(z)}-\mu_k^{(z)}.
+\end{equation}
+Thus $\Delta_k^{(z)}=0$ for optimal arms and $\Delta_k^{(z)}>0$ for suboptimal arms. We also define
+\begin{equation}
+\label{eq:max_gap}
+\Delta_{\max}
+=
+\max_{z\in\{1,\ldots,S\}}
+\max_{k\in\A}
+\Delta_k^{(z)}.
+\end{equation}
+This quantity upper bounds the regret incurred in a single stable round.
+
+\section{The TAR-UCB algorithm}
+\label{sec:algorithm}
+
+TAR-UCB maintains three components: a library of stable regimes, a UCB learner inside the currently inferred regime, and a transition detector. The algorithm operates in three modes:
+\begin{equation}
+\label{eq:modes}
+\textsc{Stable},
+\qquad
+\textsc{Transition},
+\qquad
+\textsc{Diagnostic}.
+\end{equation}
+The three modes have distinct roles. In \textsc{Stable} mode, the learner exploits and explores within the current inferred stable regime. In \textsc{Transition} mode, the learner freezes stable-regime estimates and probes all arms until the reward vector stabilizes. In \textsc{Diagnostic} mode, the learner estimates the current mean vector and matches it to the regime library.
+
+\subsection{Regime library}
+\label{subsec:regime_library}
+
+At time $t$, let
+\begin{equation}
+\label{eq:library_set}
+\mathcal L_t=\{1,\ldots,J_t\}
+\end{equation}
+be the set of regimes discovered by the learner. The number $J_t$ is random and nondecreasing over time. For every stored regime $j\in\mathcal L_t$ and arm $k\in\A$, the algorithm stores
+\begin{equation}
+\label{eq:count_statistic}
+N_{j,k}(t)
+=
+\text{number of observations of arm }k\text{ assigned to regime }j,
+\end{equation}
+and
+\begin{equation}
+\label{eq:sum_statistic}
+S_{j,k}(t)
+=
+\text{sum of rewards of arm }k\text{ assigned to regime }j.
+\end{equation}
+Whenever $N_{j,k}(t)>0$, the empirical mean is
+\begin{equation}
+\label{eq:empirical_mean}
+\widehat\mu_{j,k}(t)
+=
+\frac{S_{j,k}(t)}{N_{j,k}(t)}.
+\end{equation}
+The empirical mean vector of stored regime $j$ is
+\begin{equation}
+\label{eq:empirical_mean_vector}
+\widehat{\bm\mu}^{(j)}(t)
+=
+(\widehat\mu_{j,1}(t),\ldots,\widehat\mu_{j,K}(t)).
+\end{equation}
+The learner also stores a current inferred regime label
+\begin{equation}
+\label{eq:inferred_regime}
+\widehat Z_t\in\mathcal L_t.
+\end{equation}
+
+\subsection{Confidence bounds}
+\label{subsec:confidence_bounds}
+
+Let $\delta\in(0,1)$ be a prescribed failure probability. For $N_{j,k}(t)>0$, define
+\begin{equation}
+\label{eq:confidence_radius}
+B_{j,k}(t)
+=
+\sigma
+\sqrt{
+\frac{2\log\left(4KJ_t t^2/\delta\right)}
+{N_{j,k}(t)}
+}.
+\end{equation}
+If $N_{j,k}(t)=0$, the arm is treated as uninitialized in regime $j$ and is sampled before applying the UCB rule. The upper and lower confidence bounds are
+\begin{equation}
+\label{eq:upper_lower_bounds}
+U_{j,k}(t)=\widehat\mu_{j,k}(t)+B_{j,k}(t),
+\qquad
+L_{j,k}(t)=\widehat\mu_{j,k}(t)-B_{j,k}(t).
+\end{equation}
+The upper bound drives optimistic arm selection. The lower bound is used to detect rewards that are much lower than expected under the current stable regime.
+
+\subsection{Initialization}
+\label{subsec:initialization}
+
+The algorithm begins without a known regime. It samples each arm $m_0$ times and computes
+\begin{equation}
+\label{eq:initial_mean_vector}
+\widehat v_k^{(0)}
+=
+\frac{1}{m_0}
+\sum_{s\in\mathcal I_{0,k}}Y_s,
+\qquad
+k\in\A,
+\end{equation}
+where $\mathcal I_{0,k}$ is the set of initialization rounds in which arm $k$ was selected. The initial vector
+\begin{equation}
+\label{eq:initial_vector}
+\widehat{\bm v}^{(0)}
+=
+(\widehat v_1^{(0)},\ldots,\widehat v_K^{(0)})
+\end{equation}
+creates the first stored regime:
+\begin{equation}
+\label{eq:first_regime}
+J=1,
+\qquad
+\widehat{\bm\mu}^{(1)}=\widehat{\bm v}^{(0)},
+\qquad
+\widehat Z=1.
+\end{equation}
+The algorithm then enters \textsc{Stable} mode.
+
+\subsection{Stable mode}
+\label{subsec:stable_mode}
+
+Suppose the algorithm is in \textsc{Stable} mode and currently believes that the active regime is $j=\widehat Z_t$. The selected arm is
+\begin{equation}
+\label{eq:stable_ucb_rule}
+A_t
+\in
+\arg\max_{k\in\A}
+\left\{
+\widehat\mu_{j,k}(t)+B_{j,k}(t)
+\right\}.
+\end{equation}
+If at least one arm has zero samples in the current regime, the algorithm samples an uninitialized arm before using \eqref{eq:stable_ucb_rule}. This ensures that all arms have a finite confidence radius.
+
+After selecting $A_t$ and observing $Y_t$, the algorithm first evaluates whether the observation is compatible with the current stable-regime model. Define the one-sided drop residual
+\begin{equation}
+\label{eq:drop_residual}
+R_t
+=
+\pos{L_{j,A_t}(t)-Y_t}
+=
+\max\{L_{j,A_t}(t)-Y_t,0\}.
+\end{equation}
+The residual is positive only when the reward is below the lower confidence bound of the current stable-regime prediction. Persistent positive residuals are evidence of a transition-induced reward collapse.
+
+The residuals are accumulated by the statistic
+\begin{equation}
+\label{eq:cusum_statistic}
+G_t
+=
+\max\{0,G_{t-1}+R_t-\nu\},
+\end{equation}
+where $\nu>0$ is a tolerance parameter. A transition is declared when
+\begin{equation}
+\label{eq:transition_alarm}
+G_t\geq h,
+\end{equation}
+where $h>0$ is a threshold.
+
+If \eqref{eq:transition_alarm} does not hold, the observation is assigned to regime $j$, and the statistics are updated as
+\begin{equation}
+\label{eq:update_count_stable}
+N_{j,A_t}(t+1)=N_{j,A_t}(t)+1,
+\end{equation}
+\begin{equation}
+\label{eq:update_sum_stable}
+S_{j,A_t}(t+1)=S_{j,A_t}(t)+Y_t.
+\end{equation}
+If \eqref{eq:transition_alarm} holds, the algorithm enters \textsc{Transition} mode. The reward that triggered the alarm is not assigned to the stable-regime library, and the statistic $G_t$ is reset.
+
+\subsection{Transition mode}
+\label{subsec:transition_mode}
+
+In \textsc{Transition} mode, the learner assumes that the observed rewards may correspond to a non-stationary transition rather than to a stable regime. The stable-regime estimates are therefore frozen. The learner samples arms in round-robin batches.
+
+Let $m_{\mathrm{batch}}$ be the number of samples collected per arm in one transition batch. A batch contains $K m_{\mathrm{batch}}$ observations. For batch $b$, define
+\begin{equation}
+\label{eq:batch_mean_arm}
+\widehat v_k^{(b)}
+=
+\frac{1}{m_{\mathrm{batch}}}
+\sum_{s\in\mathcal B_b: A_s=k}Y_s,
+\qquad
+k\in\A,
+\end{equation}
+where $\mathcal B_b$ is the set of rounds in batch $b$. The corresponding batch mean vector is
+\begin{equation}
+\label{eq:batch_mean_vector}
+\widehat{\bm v}^{(b)}
+=
+(\widehat v_1^{(b)},\ldots,\widehat v_K^{(b)}).
+\end{equation}
+For $b\geq 2$, define the batch-to-batch stability statistic
+\begin{equation}
+\label{eq:stability_statistic}
+H_b
+=
+\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}.
+\end{equation}
+If $H_b>r_{\mathrm{stab}}$, the vector of rewards is considered still unstable, and the algorithm remains in \textsc{Transition} mode. If
+\begin{equation}
+\label{eq:transition_stability_condition}
+H_b\leq r_{\mathrm{stab}}
+\end{equation}
+for $q_{\mathrm{stab}}$ consecutive batches, the transition is considered finished, and the algorithm enters \textsc{Diagnostic} mode.
+
+\subsection{Diagnostic mode}
+\label{subsec:diagnostic_mode}
+
+The purpose of \textsc{Diagnostic} mode is to determine whether the newly stabilized environment corresponds to a previously discovered regime or to a genuinely new one. The algorithm samples each arm $m_{\mathrm{cls}}$ times in round-robin fashion and computes
+\begin{equation}
+\label{eq:diagnostic_arm_mean}
+\widehat v_k
+=
+\frac{1}{m_{\mathrm{cls}}}
+\sum_{s\in\mathcal D_{\mathrm{cls}}: A_s=k}Y_s,
+\qquad
+k\in\A,
+\end{equation}
+where $\mathcal D_{\mathrm{cls}}$ is the set of diagnostic samples. The diagnostic mean vector is
+\begin{equation}
+\label{eq:diagnostic_vector}
+\widehat{\bm v}
+=
+(\widehat v_1,\ldots,\widehat v_K).
+\end{equation}
+
+For each stored regime $j\in\mathcal L_t$, compute the distance
+\begin{equation}
+\label{eq:matching_distance}
+D_j
+=
+\norm{\widehat{\bm v}-\widehat{\bm\mu}^{(j)}(t)}_{\infty}.
+\end{equation}
+Let
+\begin{equation}
+\label{eq:closest_regime}
+j^\star
+\in
+\arg\min_{j\in\mathcal L_t}D_j.
+\end{equation}
+If
+\begin{equation}
+\label{eq:matched_regime_condition}
+D_{j^\star}\leq r_{\mathrm{cls}},
+\end{equation}
+the current stable regime is classified as the known regime $j^\star$, and the algorithm sets
+\begin{equation}
+\label{eq:set_matched_regime}
+\widehat Z_t=j^\star.
+\end{equation}
+The diagnostic samples may be added to the statistics of regime $j^\star$.
+
+If instead
+\begin{equation}
+\label{eq:new_regime_condition}
+D_{j^\star}>r_{\mathrm{cls}},
+\end{equation}
+the algorithm creates a new stored regime $J_t+1$. Its initial statistics are
+\begin{equation}
+\label{eq:new_regime_count}
+N_{J_t+1,k}=m_{\mathrm{cls}},
+\end{equation}
+\begin{equation}
+\label{eq:new_regime_sum}
+S_{J_t+1,k}
+=
+\sum_{s\in\mathcal D_{\mathrm{cls}}:A_s=k}Y_s,
+\end{equation}
+and
+\begin{equation}
+\label{eq:new_regime_mean}
+\widehat\mu_{J_t+1,k}
+=
+\widehat v_k.
+\end{equation}
+The inferred regime is set to
+\begin{equation}
+\label{eq:set_new_regime}
+\widehat Z_t=J_t+1.
+\end{equation}
+After matching or creating a regime, the algorithm returns to \textsc{Stable} mode.
+
+\begin{algorithm}[t]
+\caption{Transition-Aware Recurrent UCB (TAR-UCB)}
+\label{alg:tar_ucb}
+\begin{algorithmic}[1]
+\Require Number of arms $K$; confidence level $\delta$; noise scale $\sigma$; detector parameters $\nu,h$; batch parameters $m_{\mathrm{batch}},r_{\mathrm{stab}},q_{\mathrm{stab}}$; diagnostic parameters $m_{\mathrm{cls}},r_{\mathrm{cls}}$; initialization size $m_0$.
+\State Sample each arm $m_0$ times.
+\State Create the first stored regime from the initialization vector.
+\State Set $J\gets 1$, $\widehat Z\gets 1$, $G\gets 0$, and mode $\gets\textsc{Stable}$.
+\For{$t=1,2,\ldots,T$}
+    \If{mode $=\textsc{Stable}$}
+        \State Let $j\gets\widehat Z$.
+        \If{some arm has zero samples in regime $j$}
+            \State Select one such arm $A_t$.
+        \Else
+            \State Select $A_t\in\arg\max_{k\in\A}\{\widehat\mu_{j,k}(t)+B_{j,k}(t)\}$.
+        \EndIf
+        \State Observe $Y_t$.
+        \State Compute $R_t\gets\pos{L_{j,A_t}(t)-Y_t}$.
+        \State Update $G\gets\max\{0,G+R_t-\nu\}$.
+        \If{$G\geq h$}
+            \State Set mode $\gets\textsc{Transition}$.
+            \State Reset $G\gets 0$.
+            \State Do not assign the alarm-triggering reward to any stable regime.
+        \Else
+            \State Update $N_{j,A_t}$ and $S_{j,A_t}$ using $Y_t$.
+        \EndIf
+    \ElsIf{mode $=\textsc{Transition}$}
+        \State Sample arms in round-robin batches.
+        \State After each complete batch $b$, compute $\widehat{\bm v}^{(b)}$.
+        \State Compute $H_b=\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}$.
+        \If{$H_b\leq r_{\mathrm{stab}}$ for $q_{\mathrm{stab}}$ consecutive batches}
+            \State Set mode $\gets\textsc{Diagnostic}$.
+        \EndIf
+    \ElsIf{mode $=\textsc{Diagnostic}$}
+        \State Sample each arm $m_{\mathrm{cls}}$ times.
+        \State Compute the diagnostic vector $\widehat{\bm v}$.
+        \For{$j=1,\ldots,J$}
+            \State Compute $D_j=\norm{\widehat{\bm v}-\widehat{\bm\mu}^{(j)}}_{\infty}$.
+        \EndFor
+        \State Let $j^\star\in\arg\min_{j}D_j$.
+        \If{$D_{j^\star}\leq r_{\mathrm{cls}}$}
+            \State Set $\widehat Z\gets j^\star$.
+            \State Optionally add diagnostic samples to regime $j^\star$.
+        \Else
+            \State Create a new regime $J\gets J+1$ from the diagnostic samples.
+            \State Set $\widehat Z\gets J$.
+        \EndIf
+        \State Set mode $\gets\textsc{Stable}$.
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{Regret criterion}
+\label{sec:regret}
+
+The natural benchmark is an oracle that knows the active stable regime and always selects the best arm in that regime. Since transition periods are not assumed to be stationary, it is useful to separate stable-regime regret from transition regret.
+
+Let $\mathcal S_T$ be the set of stable rounds up to horizon $T$. For $t\in\mathcal S_T$, define the instantaneous stable regret
+\begin{equation}
+\label{eq:instantaneous_regret}
+r_t
+=
+\mu_{k^\star(Z_t)}^{(Z_t)}-\mu_{A_t}^{(Z_t)}.
+\end{equation}
+The stable-regime cumulative regret is
+\begin{equation}
+\label{eq:stable_regret}
+R_T^{\mathrm{stable}}
+=
+\sum_{t\in\mathcal S_T}
+\left(
+\mu_{k^\star(Z_t)}^{(Z_t)}-\mu_{A_t}^{(Z_t)}
+\right).
+\end{equation}
+Let $\mathcal T_T$ be the set of transition rounds. A separate transition cost may be defined as
+\begin{equation}
+\label{eq:transition_regret_abstract}
+R_T^{\mathrm{transition}}
+=
+\sum_{t\in\mathcal T_T}c_t,
+\end{equation}
+where $c_t$ depends on the chosen application-specific comparator during non-stationary transition periods. In the simplest empirical evaluation, transition rounds can be excluded from the stable-regime regret and reported separately. The total cost is then decomposed as
+\begin{equation}
+\label{eq:total_regret}
+R_T
+=
+R_T^{\mathrm{stable}}+R_T^{\mathrm{transition}}.
+\end{equation}
+
+\begin{remark}[Why sublinear dynamic regret is not the right target]
+If the number of regime episodes grows linearly with $T$, then regret against an oracle that immediately knows every active regime cannot generally be sublinear. The appropriate objective is instead to control the regret induced by each episode: after a regime has been learned, later visits to the same regime should incur only detection and classification costs, not a full relearning cost.
+\end{remark}
+
+\section{Assumptions for analysis}
+\label{sec:assumptions}
+
+The following assumptions are sufficient for a high-probability proof sketch. They are not meant to be minimal; rather, they isolate the quantities that govern the behavior of the algorithm.
+
+\begin{assumption}[Finite recurrent regimes]
+\label{ass:finite_regimes}
+There are $S<\infty$ distinct stable regimes, each identified by a mean vector $\bm\mu^{(z)}\in\R^K$. Regimes may recur multiple times.
+\end{assumption}
+
+\begin{assumption}[Regime separation]
+\label{ass:regime_separation}
+The stable regimes are separated in sup-norm:
+\begin{equation}
+\label{eq:ass_regime_separation}
+\Delta_{\mathrm{reg}}
+=
+\min_{z\neq z'}
+\norm{\bm\mu^{(z)}-\bm\mu^{(z')}}_{\infty}
+>0.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Detectable transition drops]
+\label{ass:detectable_drop}
+At the beginning of every transition following stable regime $z$, condition \eqref{eq:transition_drop_condition} holds for at least $\ell_{\mathrm{drop}}$ consecutive observations, with $d_{\min}>0$.
+\end{assumption}
+
+\begin{assumption}[Long enough stable episodes]
+\label{ass:long_episodes}
+Every stable episode is long enough to allow post-transition diagnostic sampling and subsequent exploitation. In particular, its length is larger than the sum of the detection delay, transition-stabilization time, and diagnostic sampling time.
+\end{assumption}
+
+\begin{assumption}[Correct stabilization signal]
+\label{ass:stabilization}
+After each transition, the batch stability test \eqref{eq:transition_stability_condition} is eventually satisfied only after the process has entered a stable regime, except on an event of probability at most $\delta$.
+\end{assumption}
+
+\begin{assumption}[Bounded single-step stable regret]
+\label{ass:bounded_gap}
+The maximum stable-regime regret per round is finite:
+\begin{equation}
+\label{eq:bounded_single_step_regret}
+\Delta_{\max}<\infty.
+\end{equation}
+\end{assumption}
+
+\section{Proof ingredients}
+\label{sec:proof_ingredients}
+
+This section gives proof sketches for the main components of the regret analysis. The objective is to show how the regret decomposes into a learning cost within recurrent regimes, a transition-detection cost, and a post-transition classification cost.
+
+\subsection{Uniform confidence event}
+\label{subsec:uniform_confidence_event}
+
+Define the event
+\begin{equation}
+\label{eq:confidence_event}
+\mathcal E_T
+=
+\left\{
+\forall t\leq T,
+\forall j\leq J_t,
+\forall k\in\A:
+\abs{\widehat\mu_{j,k}(t)-\mu_k^{(z(j))}}
+\leq
+B_{j,k}(t)
+\right\},
+\end{equation}
+where $z(j)$ denotes the true stable regime represented by stored library element $j$, whenever that element has been correctly classified.
+
+\begin{lemma}[Uniform confidence]
+\label{lem:uniform_confidence}
+Under Assumption~\ref{ass:subgaussian_noise}, if observations assigned to a stored regime $j$ indeed come from the corresponding stable regime, then
+\begin{equation}
+\label{eq:uniform_confidence_probability}
+\Pp(\mathcal E_T)
+\geq
+1-\delta.
+\end{equation}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+For a fixed regime-arm pair $(j,k)$ and a fixed sample size $n$, the empirical mean of $n$ conditionally sub-Gaussian observations satisfies
+\begin{equation}
+\label{eq:subgaussian_mean_tail}
+\Pp\left(
+\abs{\widehat\mu_{j,k}-\mu_k^{(z(j))}}
+>
+\sigma\sqrt{\frac{2x}{n}}
+\right)
+\leq
+2e^{-x}.
+\end{equation}
+Choosing $x=\log(4KJ_t t^2/\delta)$ and applying a union bound over arms, stored regimes, and times gives a summable error probability of order $\delta$. The factor $t^2$ ensures that the sum over time is finite. This yields \eqref{eq:uniform_confidence_probability}.
+\end{proof}
+
+\subsection{Stable-regime UCB regret}
+\label{subsec:stable_ucb_regret}
+
+The recurrent-regime library allows all observations assigned to the same regime to be pooled across multiple visits. Thus the learning cost depends primarily on the number of distinct regimes, not on the number of episodes.
+
+\begin{lemma}[UCB regret within recurrent regimes]
+\label{lem:ucb_regret}
+Assume that event $\mathcal E_T$ holds and that all stable rounds are assigned to their correct stored regimes. Then the number of times a suboptimal arm $k$ is selected in regime $z$ satisfies
+\begin{equation}
+\label{eq:suboptimal_pulls_bound}
+N_{z,k}^{\mathrm{sub}}(T)
+\leq
+C
+\frac{\sigma^2\log T}{(\Delta_k^{(z)})^2}
++
+C_0,
+\end{equation}
+for universal constants $C,C_0>0$. Consequently,
+\begin{equation}
+\label{eq:ucb_regret_bound}
+R_{T,\mathrm{UCB}}^{\mathrm{stable}}
+\leq
+C
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_0
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\Delta_k^{(z)}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Fix a stable regime $z$ and a suboptimal arm $k$. On the confidence event, the optimal arm $k^\star(z)$ has UCB at least its true mean:
+\begin{equation}
+\label{eq:optimal_ucb_lower}
+U_{z,k^\star(z)}(t)
+\geq
+\mu_{k^\star(z)}^{(z)}.
+\end{equation}
+If the suboptimal arm $k$ is selected by the UCB rule, then
+\begin{equation}
+\label{eq:suboptimal_selected_ucb}
+U_{z,k}(t)
+\geq
+U_{z,k^\star(z)}(t)
+\geq
+\mu_{k^\star(z)}^{(z)}.
+\end{equation}
+Again using the confidence event,
+\begin{equation}
+\label{eq:suboptimal_ucb_upper}
+U_{z,k}(t)
+\leq
+\mu_k^{(z)}+2B_{z,k}(t).
+\end{equation}
+Therefore selection of arm $k$ implies
+\begin{equation}
+\label{eq:radius_gap_condition}
+2B_{z,k}(t)
+\geq
+\Delta_k^{(z)}.
+\end{equation}
+Solving this inequality for $N_{z,k}(t)$ gives the pull bound \eqref{eq:suboptimal_pulls_bound}. Multiplying by $\Delta_k^{(z)}$ and summing over regimes and arms gives \eqref{eq:ucb_regret_bound}.
+\end{proof}
+
+\subsection{Transition detection}
+\label{subsec:transition_detection_proof}
+
+The transition detector exploits the fact that all arms drop during transitions. Since the selected arm also drops, the detector can accumulate evidence from whichever arm is pulled.
+
+\begin{lemma}[Detection delay]
+\label{lem:detection_delay}
+Assume that event $\mathcal E_T$ holds. Suppose a transition starts after a correctly identified stable regime $z$, and suppose that \eqref{eq:transition_drop_condition} holds for at least $\ell_{\mathrm{drop}}$ consecutive observations. If, throughout the pre-alarm period, the confidence radii of selected arms are at most $d_{\min}/4$ and the detector tolerance satisfies $\nu\leq d_{\min}/4$, then the detector has positive drift during the transition. In particular, for an appropriate threshold $h=O(\sigma\sqrt{\log(T/\delta)})$, the transition is detected within
+\begin{equation}
+\label{eq:detection_delay_bound}
+D_{\mathrm{det}}
+=
+O\left(
+\frac{\sigma^2}{d_{\min}^2}\log\frac{T}{\delta}
+\right)
+\end{equation}
+observations with probability at least $1-\delta$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+On $\mathcal E_T$, the lower confidence bound satisfies
+\begin{equation}
+\label{eq:lcb_lower_during_transition}
+L_{z,k}(t)
+=
+\widehat\mu_{z,k}(t)-B_{z,k}(t)
+\geq
+\mu_k^{(z)}-2B_{z,k}(t).
+\end{equation}
+If $B_{z,k}(t)\leq d_{\min}/4$, then
+\begin{equation}
+\label{eq:lcb_transition_gap}
+L_{z,k}(t)
+\geq
+\mu_k^{(z)}-\frac{d_{\min}}{2}.
+\end{equation}
+During the detectable part of the transition,
+\begin{equation}
+\label{eq:transition_expected_reward}
+\E[Y_t\mid A_t=k,\F_{t-1}]
+\leq
+\mu_k^{(z)}-d_{\min}.
+\end{equation}
+Hence the expected drop residual is at least of order $d_{\min}/2$, up to the one-sided truncation and noise. After subtracting the tolerance $\nu\leq d_{\min}/4$, the CUSUM statistic has positive drift of order $d_{\min}$. A concentration inequality for sums of sub-Gaussian increments then implies that a threshold of order $\sigma\sqrt{\log(T/\delta)}$, or equivalently a threshold calibrated to make false alarms rare, is crossed after at most \eqref{eq:detection_delay_bound} observations with probability at least $1-\delta$.
+\end{proof}
+
+\begin{lemma}[False alarm control]
+\label{lem:false_alarm}
+During a stable period correctly assigned to regime $z$, the probability that the detector declares a transition before time $T$ can be made at most $\delta$ by choosing $h$ of order $\sigma\sqrt{\log(T/\delta)}$ or larger, with constants depending on the tolerance $\nu$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+During a correctly assigned stable period, the lower confidence bound is below the true mean on $\mathcal E_T$, and therefore the residual $R_t=\pos{L_{z,A_t}(t)-Y_t}$ is caused only by negative noise fluctuations. The tolerance $\nu$ gives the CUSUM increments non-positive drift under stability. Standard maximal inequalities for sub-Gaussian or sub-exponential supermartingales imply that the probability of crossing a threshold $h$ before time $T$ decreases exponentially in $h^2/\sigma^2$ or in the corresponding linear-exponential scale. Choosing $h$ proportional to the appropriate logarithmic confidence level yields the claimed bound.
+\end{proof}
+
+\subsection{Regime classification}
+\label{subsec:classification_proof}
+
+The diagnostic step compares the newly estimated mean vector with all stored mean vectors. Since all arms change their mean across regimes, using the full vector gives a direct classification criterion.
+
+\begin{lemma}[Diagnostic classification]
+\label{lem:diagnostic_classification}
+Suppose that the current stable regime is $z$ and that all previously discovered regimes have empirical vectors within $\Delta_{\mathrm{reg}}/8$ of their true mean vectors in sup-norm. If
+\begin{equation}
+\label{eq:m_cls_requirement}
+m_{\mathrm{cls}}
+\geq
+C
+\frac{\sigma^2}{\Delta_{\mathrm{reg}}^2}
+\log\left(\frac{KT}{\delta}\right),
+\end{equation}
+then the diagnostic vector satisfies
+\begin{equation}
+\label{eq:diagnostic_concentration}
+\norm{\widehat{\bm v}-\bm\mu^{(z)}}_{\infty}
+\leq
+\frac{\Delta_{\mathrm{reg}}}{8}
+\end{equation}
+with probability at least $1-\delta$. Consequently, if the threshold satisfies
+\begin{equation}
+\label{eq:r_cls_choice}
+\frac{\Delta_{\mathrm{reg}}}{4}
+<
+r_{\mathrm{cls}}
+<
+\frac{3\Delta_{\mathrm{reg}}}{4},
+\end{equation}
+then nearest-neighbor matching in \eqref{eq:matching_distance} correctly identifies regime $z$ if it is already in the library, and creates a new regime otherwise.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+For each arm, the diagnostic mean is an average of $m_{\mathrm{cls}}$ sub-Gaussian observations. A union bound over arms gives \eqref{eq:diagnostic_concentration} once $m_{\mathrm{cls}}$ satisfies \eqref{eq:m_cls_requirement}. If the correct regime $z$ is already in the library, the triangle inequality gives
+\begin{equation}
+\label{eq:correct_distance_bound}
+\norm{\widehat{\bm v}-\widehat{\bm\mu}^{(z)}}_{\infty}
+\leq
+\frac{\Delta_{\mathrm{reg}}}{4}.
+\end{equation}
+For any other stored regime $z'\neq z$,
+\begin{align}
+\label{eq:wrong_distance_bound}
+\norm{\widehat{\bm v}-\widehat{\bm\mu}^{(z')}}_{\infty}
+&\geq
+\norm{\bm\mu^{(z)}-\bm\mu^{(z')}}_{\infty}
+-
+\norm{\widehat{\bm v}-\bm\mu^{(z)}}_{\infty}
+-
+\norm{\widehat{\bm\mu}^{(z')}-\bm\mu^{(z')}}_{\infty}
+\\
+&\geq
+\Delta_{\mathrm{reg}}-\frac{\Delta_{\mathrm{reg}}}{8}-
+\frac{\Delta_{\mathrm{reg}}}{8}
+=
+\frac{3\Delta_{\mathrm{reg}}}{4}.
+\end{align}
+Thus the correct stored regime is the unique nearest neighbor. If regime $z$ is not in the library, every stored regime is at distance at least $3\Delta_{\mathrm{reg}}/4$, so the rule creates a new regime. The threshold condition \eqref{eq:r_cls_choice} separates the two cases.
+\end{proof}
+
+\section{Main regret statement}
+\label{sec:main_regret}
+
+Let $G_T$ be the number of stable-regime episodes up to time $T$. A stable-regime episode is a maximal stable interval between two transition periods. Since regimes may recur, $G_T$ can be much larger than $S$. In the target application, $G_T$ may grow linearly with $T$.
+
+Let $D_{\mathrm{det}}$ be a high-probability upper bound on the delay between the start of a transition and its detection. Let $D_{\mathrm{stab}}$ be an upper bound on the number of transition-mode observations required before the batch stability condition is satisfied. The diagnostic phase uses exactly $K m_{\mathrm{cls}}$ observations.
+
+\begin{theorem}[Regret decomposition for TAR-UCB]
+\label{thm:main_regret}
+Assume Assumptions~\ref{ass:subgaussian_noise}--\ref{ass:bounded_gap}. Choose confidence radii as in \eqref{eq:confidence_radius}, choose $m_{\mathrm{cls}}$ satisfying \eqref{eq:m_cls_requirement}, and choose detector parameters so that Lemmas~\ref{lem:detection_delay} and~\ref{lem:false_alarm} hold. Then, with probability at least $1-c\delta$ for a universal constant $c>0$, the stable-regime regret of TAR-UCB satisfies
+\begin{equation}
+\label{eq:main_regret_bound}
+R_T^{\mathrm{stable}}
+\leq
+C_1
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_2\Delta_{\max}G_TD_{\mathrm{det}}
++
+C_3\Delta_{\max}G_TK m_{\mathrm{cls}}
++
+C_4\Delta_{\max}G_TD_{\mathrm{stab}},
+\end{equation}
+where $C_1,C_2,C_3,C_4>0$ are numerical constants.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The proof decomposes the stable-regime regret into four parts.
+
+First, consider stable rounds that occur after the current regime has been correctly identified and outside the detection and diagnostic phases. On the uniform confidence event, Lemma~\ref{lem:ucb_regret} gives the UCB learning cost. Because the algorithm stores a recurrent-regime library, samples collected during different visits to the same regime are pooled. Therefore this term scales with the number of distinct regimes $S$, not with the number of episodes $G_T$.
+
+Second, after a transition starts, the algorithm may continue to behave as if the previous stable regime were active until the detector fires. Lemma~\ref{lem:detection_delay} bounds this delay by $D_{\mathrm{det}}$ with high probability. Each such round can contribute at most $\Delta_{\max}$ to the stable-regime regret, giving a total detection cost of order $\Delta_{\max}G_TD_{\mathrm{det}}$.
+
+Third, after the transition is detected, the algorithm enters transition mode and waits until the reward vector stabilizes. The corresponding number of rounds is bounded by $D_{\mathrm{stab}}$. These rounds are not used to update stable-regime estimates. If they are counted in the stable-regime regret, their total contribution is at most $\Delta_{\max}G_TD_{\mathrm{stab}}$. If transition rounds are excluded from $R_T^{\mathrm{stable}}$, this term is instead reported as part of $R_T^{\mathrm{transition}}$.
+
+Fourth, once the process has stabilized, the diagnostic phase samples each arm $m_{\mathrm{cls}}$ times. This costs $K m_{\mathrm{cls}}$ observations per episode. Lemma~\ref{lem:diagnostic_classification} shows that the current regime is then correctly matched to the library, or correctly added as a new regime, with high probability. The regret contribution is therefore at most $\Delta_{\max}G_TK m_{\mathrm{cls}}$.
+
+Combining the four bounds and applying a union bound over the confidence, detection, false-alarm, stabilization, and classification events gives \eqref{eq:main_regret_bound}.
+\end{proof}
+
+\begin{corollary}[Scaling under standard parameter choices]
+\label{cor:scaling}
+Under the assumptions of Theorem~\ref{thm:main_regret}, if
+\begin{equation}
+\label{eq:d_det_scaling_corollary}
+D_{\mathrm{det}}
+=
+O\left(\frac{\sigma^2}{d_{\min}^2}\log\frac{T}{\delta}\right)
+\end{equation}
+and
+\begin{equation}
+\label{eq:m_cls_scaling_corollary}
+m_{\mathrm{cls}}
+=
+O\left(\frac{\sigma^2}{\Delta_{\mathrm{reg}}^2}\log\frac{KT}{\delta}\right),
+\end{equation}
+then
+\begin{align}
+\label{eq:scaling_regret_bound}
+R_T^{\mathrm{stable}}
+&\leq
+O\left(
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
+\right)
+\\
+&\quad
++
+O\left(
+\Delta_{\max}G_T
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta}
+\right)
++
+O\left(
+\Delta_{\max}G_TK
+\frac{\sigma^2}{\Delta_{\mathrm{reg}}^2}
+\log\frac{KT}{\delta}
+\right)
++
+O(\Delta_{\max}G_TD_{\mathrm{stab}}).
+\end{align}
+\end{corollary}
+
+\begin{remark}[Interpretation]
+If $G_T$ grows linearly with $T$, then the cumulative regret bound is generally linear in $T$. This is unavoidable when the benchmark is an oracle that instantly knows every hidden regime. The meaningful guarantee is that each transition contributes only a controlled amount of regret, while the learning cost for a recurrent regime is not paid again from scratch at every reappearance.
+\end{remark}
+
+\section{Choice of parameters}
+\label{sec:parameters}
+
+The main parameters have the following roles.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Meaning \\
+\midrule
+$\sigma$ & sub-Gaussian noise scale used in confidence bounds \\
+$\delta$ & target failure probability for high-probability statements \\
+$m_0$ & initial number of samples per arm \\
+$\nu$ & tolerance in the one-sided transition detector \\
+$h$ & threshold for declaring a transition \\
+$m_{\mathrm{batch}}$ & samples per arm in one transition-mode batch \\
+$r_{\mathrm{stab}}$ & threshold for deciding that batch vectors have stabilized \\
+$q_{\mathrm{stab}}$ & number of consecutive stable batches required before diagnostic mode \\
+$m_{\mathrm{cls}}$ & diagnostic samples per arm \\
+$r_{\mathrm{cls}}$ & maximum matching distance for an existing regime \\
+\bottomrule
+\end{tabular}
+\caption{Main parameters of TAR-UCB.}
+\label{tab:tar_parameters}
+\end{table}
+
+The classification sample size should scale as
+\begin{equation}
+\label{eq:practical_m_cls_choice}
+m_{\mathrm{cls}}
+\asymp
+\frac{\sigma^2}{\Delta_{\mathrm{reg}}^2}
+\log\frac{KT}{\delta}.
+\end{equation}
+The transition detection delay improves when the reward-collapse magnitude $d_{\min}$ is large:
+\begin{equation}
+\label{eq:practical_detection_scaling}
+D_{\mathrm{det}}
+\asymp
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta}.
+\end{equation}
+The threshold $r_{\mathrm{cls}}$ should lie between the typical estimation error of a diagnostic vector and the separation between different regimes. In the idealized analysis, one can choose
+\begin{equation}
+\label{eq:practical_r_cls_choice}
+r_{\mathrm{cls}}\in
+\left(
+\frac{\Delta_{\mathrm{reg}}}{4},
+\frac{3\Delta_{\mathrm{reg}}}{4}
+\right).
+\end{equation}
+In practice, $\Delta_{\mathrm{reg}}$ is unknown, so $r_{\mathrm{cls}}$ should be selected from validation data or adapted online.
+
+\section{Discussion}
+\label{sec:discussion}
+
+TAR-UCB is designed for environments in which regime changes have a global signature. The algorithm uses this structure in two ways. First, transitions are detected through a one-sided residual that compares the observed reward with the lower confidence bound of the current stable regime. Since all arms drop during transitions, the detector can use whichever arm is sampled. Second, after the transition has stabilized, the current regime is identified through the full vector of arm means. This exploits the assumption that all arm means change across regimes and that regimes are separated as vectors.
+
+The recurrent-regime library is the main difference between TAR-UCB and a pure restart strategy. A restart algorithm discards old observations after every detected change and relearns the best arm from scratch. TAR-UCB instead stores regime-specific statistics and reuses them when a previously observed regime reappears. Therefore, the arm-learning term in the regret bound scales with the number of distinct regimes $S$, while detection and classification costs scale with the number of episodes $G_T$.
+
+The algorithm should not be interpreted as guaranteeing sublinear regret when the number of regime episodes grows linearly with the horizon. In such settings, sublinear dynamic regret against an oracle that observes every regime switch immediately is generally not attainable. The appropriate objective is controlled per-episode regret: fast transition detection, reliable regime classification, and reuse of previously learned regimes.
+
+\end{document}

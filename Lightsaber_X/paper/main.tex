@@ -1,0 +1,617 @@
+% =====================================================================
+%  Online controller selection for the angular control of
+%  gravitational-wave detectors under non-stationary noise
+%
+%  FIRST DRAFT.  Sections marked with \todo{...} are placeholders or
+%  require results not yet produced (notably the bandit experiments).
+%  Compile with pdflatex (standard packages only; no bibtex needed).
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{authblk}
+
+% Lightweight unit macro (avoids the siunitx dependency); works in math and text.
+\newcommand{\SI}[2]{#1\,\text{#2}}
+\newcommand{\si}[1]{\text{#1}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\Chard}{u_{\mathrm{h}}}
+\newcommand{\ehard}{e_{\mathrm{h}}}
+\newcommand{\Cz}{C_{0}}
+\newcommand{\Co}{C_{1}}
+\newcommand{\Ct}{C_{2}}
+
+\title{\bfseries Online controller selection for the angular control of
+gravitational-wave detectors under non-stationary noise:\\
+a multi-armed bandit approach}
+
+\author[1]{Marco Grillo}
+\author[1,2]{Tomislav Andric}
+\author[1,2]{Jan Harms}
+\affil[1]{Gran Sasso Science Institute (GSSI), I-67100 L'Aquila, Italy}
+\affil[2]{INFN, Laboratori Nazionali del Gran Sasso, I-67100 Assergi, Italy}
+
+\date{Draft --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The angular control loops of gravitational-wave (GW) detectors must reject
+radiation-pressure (Sidles--Sigg) torques whose strength, together with the
+seismic and sensing-noise environment, varies over time. In current operation
+the choice of control filter is changed by hand by operators, for instance
+switching from low- to high-gain alignment control when an earthquake
+early-warning system forecasts elevated ground motion. We formulate this
+choice as an \emph{online controller-selection} problem and study whether a
+multi-armed bandit policy can perform the selection autonomously so as to
+minimise a long-horizon cost. Using a time-domain simulator of the pitch
+degree of freedom of a coupled-cavity detector, validated against a reference
+implementation, we define three operating regimes and a family of fixed linear
+controllers with a designed one-to-one regime--controller correspondence, and
+a scalar reward built from the hard-eigenmode error and control effort. We make
+three contributions ahead of the bandit study itself. First, we characterise
+the reward landscape and show that the designed one-to-one regime--controller
+mapping holds in all three regimes, robustly in the nominal and intermediate
+regimes and marginally in the extreme regime, with a non-saturating reward.
+Second, we
+quantify the cost of switching controllers and find a pronounced asymmetry:
+gain-decreasing switches are far costlier than gain-increasing ones. Third, and
+most importantly, we show that the apparent switching penalty is dominated by
+the \emph{controller-handover implementation}: a naive state reset or raw
+state carry-over produces large transients, whereas a bumpless, parallel-bank
+handover renders the switching cost negligible for this gain-scaled controller
+family. \todo{Add one or two sentences summarising the bandit-comparison
+results (AdSwitch vs.\ alternatives) once available.}
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}\label{sec:intro}
+% ---------------------------------------------------------------------
+Second-generation gravitational-wave detectors such as Advanced
+LIGO~\cite{aLIGO} and Advanced Virgo~\cite{aVirgo} are kilometre-scale
+Fabry--Perot--Michelson interferometers whose test masses are suspended as
+multi-stage pendula. Beyond the longitudinal degrees of freedom used to read out
+the GW signal, the \emph{angular} degrees of freedom of the mirrors must be
+actively controlled: residual angular motion couples to the longitudinal
+signal and, more fundamentally, the circulating optical power exerts
+radiation-pressure torques that soften one angular eigenmode and stiffen the
+other---the Sidles--Sigg effect~\cite{SidlesSigg}. The alignment sensing and
+control (ASC) loops that stabilise these modes operate close to a
+power-dependent instability and are a recognised limit to detector duty cycle
+and low-frequency sensitivity~\cite{Barsotti}.
+
+The disturbance environment of these loops is strongly non-stationary. Ground
+motion exhibits a diurnal cycle, a microseismic band that is modulated by
+weather and oceanic activity on timescales of hours to days, and rare, intense
+transients associated with earthquakes and storms. A single fixed controller
+cannot be simultaneously optimal across this range of conditions: a high-gain
+loop that rejects large low-frequency disturbances injects excess control
+noise when the environment is quiet, while a low-gain loop that is quiet in
+nominal conditions fails to maintain alignment during elevated ground motion.
+In current practice this trade-off is managed manually: operators (or simple
+rule-based logic) switch between predefined control filters, for example moving
+to a high-gain alignment configuration when an earthquake early-warning system
+predicts high incoming ground motion.
+
+This manual, forecast-driven switching is a natural candidate for automation. We
+pose it as an \emph{online controller-selection} problem: given a fixed library
+of controllers and a scalar performance signal computed online from the loop's
+own error and control signals, an autonomous policy must repeatedly choose which
+controller to apply so as to minimise the time-integrated cost, without prior
+knowledge of when the environment will change. This is precisely the setting of
+the \emph{non-stationary multi-armed bandit}~\cite{Lattimore,GarivierMoulines,
+AdSwitch}: each controller is an arm, the negative cost is a stochastic reward
+whose distribution shifts when the environment changes, and the policy must
+balance exploration (testing controllers to detect such shifts) against
+exploitation (using the controller currently believed best).
+
+In this work we build the simulation and problem infrastructure required to
+study this question rigorously, and we report a set of results that are
+prerequisites to---and partly independent of---the choice of bandit algorithm.
+Our contributions are:
+\begin{enumerate}
+  \item A time-domain detector model with an explicit, validated plant, in which
+  three operating regimes and a family of fixed linear controllers are defined
+  so as to admit a designed one-to-one regime--controller mapping
+  (Sections~\ref{sec:framework}--\ref{sec:problem}).
+  \item A characterisation of the resulting reward landscape
+  (Section~\ref{sec:reward}), establishing that the one-to-one mapping holds in
+  all three regimes (robustly in the nominal and intermediate regimes, marginally
+  in the extreme regime) and that the reward is non-saturating, so a learnable
+  signal is present in every regime.
+  \item A quantitative study of the \emph{dynamics of switching}
+  (Section~\ref{sec:switch}): the transient cost of changing controllers, its
+  asymmetry in the direction of the gain change, and---central to the
+  feasibility of online switching---the dependence of this cost on the
+  controller-handover implementation, with the conclusion that a realistic
+  bumpless handover makes switching nearly free.
+\end{enumerate}
+The online-selection experiments that build on this infrastructure are
+described in Section~\ref{sec:bandit}; \todo{state whether they are included in
+this version or deferred}.
+
+% =====================================================================
+\section{Background}\label{sec:background}
+% ---------------------------------------------------------------------
+\subsection{Angular control and the Sidles--Sigg effect}\label{sec:bg-ss}
+Consider the two test masses forming a single arm cavity of length $L$ with
+radii of curvature $R_1$ (input, ITM) and $R_2$ (end, ETM). In the pitch
+(vertical-plane tilt) degree of freedom, the cavity geometry is described by the
+$g$-factors $g_i = 1 - L/R_i$. The radiation pressure of the circulating power
+couples the two mirror tilts; diagonalising the coupling yields two angular
+eigenmodes, conventionally termed \emph{soft} and \emph{hard}, with
+optical-spring-modified torsional stiffnesses. The transformation from the local
+(ITM, ETM) tilt basis to the eigenbasis is
+\begin{equation}
+  r = \tfrac{1}{2}\!\left(g_1 - g_2 + \sqrt{(g_1-g_2)^2 + 4}\right),\qquad
+  T_{\mathrm{loc}\to\mathrm{eig}} = \frac{1}{1+r^2}\begin{pmatrix} 1 & r \\ -r & 1\end{pmatrix},
+  \label{eq:eigen}
+\end{equation}
+and the beam-spot-to-angle response factors of the two modes are
+\begin{equation}
+  \frac{\partial y}{\partial\theta}\bigg|_{\mathrm{soft/hard}}
+  = \frac{L}{2}\,\frac{(g_1+g_2)\pm\sqrt{(g_2-g_1)^2+4}}{g_1 g_2 - 1}.
+  \label{eq:dydth}
+\end{equation}
+For the parameters of interest the hard mode is the limiting loop: it carries
+the dominant radiation-pressure torque and is the relevant control-noise
+injection path, and we therefore use it as the sole performance channel
+throughout (Section~\ref{sec:problem}). The circulating power that sets the
+strength of this coupling follows the Fabry--Perot resonance condition
+\begin{equation}
+  P_{\mathrm{cav}} = \frac{P_{\mathrm{in}}\,T_1}
+  {\left|\,1 - \sqrt{R_1 R_2}\,\exp\!\big(4\pi i\,\delta L_{\mathrm{hp}}/\lambda\big)\right|^2},
+  \label{eq:cavpow}
+\end{equation}
+with $T_1$ the ITM power transmissivity, $\lambda$ the laser wavelength, and
+$\delta L_{\mathrm{hp}}$ the high-passed cavity-length change induced by the
+mirror tilts.
+
+\subsection{The non-stationary disturbance environment}\label{sec:bg-env}
+The seismic input to the suspensions varies on multiple timescales: a diurnal
+component, a microseismic band modulated by weather over hours to days, and
+sporadic high-amplitude transients. Operationally, this motivates a small set of
+qualitatively distinct \emph{regimes} and a corresponding set of controllers
+tuned for each, between which the configuration is switched. A key methodological
+point, which we adopt throughout, is that physically relevant non-stationarity
+is \emph{adiabatic}: the environment evolves continuously rather than by abrupt
+steps, so that the interesting question is whether control remains stable, and a
+selection policy beneficial, \emph{through} the slow transitions
+\cite{Harms_internal}. \todo{cite the LIGO/MIT operational practice of
+earthquake-triggered low/high-gain ASC switching with a proper reference.}
+
+\subsection{Bandits for non-stationary rewards}\label{sec:bg-bandit}
+In the stochastic multi-armed bandit, a policy repeatedly selects one of $K$
+arms and observes a reward drawn from that arm's (unknown) distribution, with
+the goal of minimising regret relative to the best arm~\cite{Lattimore}. When
+the reward distributions change over time the relevant notion is
+\emph{non-stationary} regret against the best arm \emph{at each time}. Two broad
+families address this: passively forgetting methods, such as discounted or
+sliding-window UCB~\cite{GarivierMoulines} and exponential-weighting variants;
+and actively adaptive methods that detect distribution changes, of which
+AdSwitch~\cite{AdSwitch} is a representative with regret guarantees under an
+unknown number of changes. Under milder, more informative statistical
+assumptions about the regimes, Bayesian approaches such as Thompson
+sampling~\cite{Thompson,RussoTutorial}, possibly in a contextual form, may
+exploit structure that the worst-case methods cannot. The appropriate choice
+depends on the regime-switching statistics and the separation of the per-arm
+reward distributions; quantifying the latter is one purpose of
+Section~\ref{sec:reward}.
+
+% =====================================================================
+\section{Simulation framework}\label{sec:framework}
+% ---------------------------------------------------------------------
+\subsection{Time-domain plant model}\label{sec:fw-plant}
+We use a time-domain simulator (``Lightsaber'') of the pitch degree of freedom
+of a single arm cavity, run as a per-sample closed loop at a sampling frequency
+$f_s = \SI{256}{Hz}$. The principal parameters are an arm length
+$L = \SI{3994.5}{m}$, radii of curvature $R_1 = \SI{1934}{m}$ and
+$R_2 = \SI{2245}{m}$, ITM transmissivity $T_1 = 0.014$, laser wavelength
+$\lambda = \SI{1064}{nm}$, and a nominal arm-cavity input power
+$P_{\mathrm{in}} = \SI{705}{W}$ (corresponding to a nominal circulating power of
+order \SI{200}{kW}).
+
+At each time step the plant (i) injects test-mass pitch noise obtained by
+filtering colored seismic and damping-loop (OSEM) noise through measured
+suspension transfer functions; (ii) computes the cavity power from
+Eq.~\eqref{eq:cavpow}; (iii) forms the radiation-pressure torques on the two
+masses,
+\begin{equation}
+  \tau = \frac{2}{c}\Big(P_{\mathrm{cav}}\,\mathbf{s} + \mathbf{s}_0\,(P_{\mathrm{cav}}-P_{\mathrm{dc}})\Big),
+  \label{eq:torque}
+\end{equation}
+with $\mathbf{s}$ the beam-spot vector, $\mathbf{s}_0$ a static beam-spot offset
+defining the operating point, and $P_{\mathrm{dc}}$ a reference power; (iv)
+propagates torque and actuation to mirror angle through the radiation-pressure
+($\mathrm{TM}{\to}\mathrm{P}$) and actuator ($\mathrm{PUM}{\to}\mathrm{TM}$)
+state-space models; (v) reads out the two eigenmodes via
+Eq.~\eqref{eq:eigen} with additive sensing noise; (vi) applies a
+power-dependent Sidles--Sigg compensation path; and (vii) computes the
+controller actuation. The controllers act on the eigenmode error and their
+output is mapped back to the local actuation basis. All recursive elements
+(plant, compensator, controller) are second-order-section (SOS) digital filters
+with persistent internal state, so that the simulation is a faithful continuous
+closed loop rather than a sequence of independent batches.
+
+\subsection{Validation against the reference simulator}\label{sec:fw-valid}
+The plant used here is a refactored version of an earlier, component-graph
+reference implementation. We verified that the refactoring preserves the
+physics. The two core plant transfer functions---the actuator response
+($\mathrm{PUM}{\to}\mathrm{TM}$, gain $93.53$) and the radiation-pressure
+response ($\mathrm{TM}{\to}\mathrm{P}$, gain $2.5677$)---are identical
+zero--pole--gain models; the three measured suspension transfer functions are
+bit-identical between the two codebases (maximum amplitude difference $0$); and
+the high-pass, Fabry--Perot, eigenmode and beam-spot expressions coincide. The
+differences between the two implementations are confined to the deliberately
+modified experimental layer---the static operating point $\mathbf{s}_0$, the
+form of the Sidles--Sigg compensator, the controller family
+(Section~\ref{sec:problem}), and the regime-dependent noise inputs---and none
+constitutes a change to the underlying plant. We therefore treat the present
+plant as physically equivalent to the reference. \todo{Optionally add a
+quantitative dynamic cross-check (matched-configuration output PSD overlay).}
+
+% =====================================================================
+\section{Problem formulation}\label{sec:problem}
+% ---------------------------------------------------------------------
+\subsection{Operating regimes}\label{sec:pr-regimes}
+We define three operating regimes that differ along physically motivated axes:
+the optical power (and hence the Sidles--Sigg coupling strength), the seismic
+input level, and the sensing (readout) noise. The scale factors, applied to the
+nominal configuration, are listed in Table~\ref{tab:regimes}; the underlying
+amplitude spectral densities are derived from O4-era data. Regime $R_0$ is the
+nominal, low-ground-motion state; $R_1$ a high-microseism state; and $R_2$ an
+extreme state with strongly elevated seismic input but a comparatively clean
+sensor.
+
+\begin{table}[t]
+  \centering
+  \caption{Regime definitions: multiplicative scale factors applied to the
+  nominal configuration.}
+  \label{tab:regimes}
+  \begin{tabular}{lccc}
+    \toprule
+     & $R_0$ (nominal) & $R_1$ (high-micro) & $R_2$ (extreme) \\
+    \midrule
+    Optical-power scale          & 1.00 & 0.95 & 0.90 \\
+    Sensing-noise scale          & 120  & 12   & 0.25 \\
+    Seismic-input scale          & 1.0  & 6.0  & 20.0 \\
+    OSEM (damping) scale         & 1.0  & 1.0  & 1.0  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Controller family}\label{sec:pr-ctrl}
+We consider three fixed hard-mode controllers, $\Cz$, $\Co$, $\Ct$, which share
+an identical filter shape and differ only by an overall DC gain
+($30$, $44.2$, $50$ respectively). They are therefore a one-parameter gain
+family: driven by the same error signal, their outputs are proportional,
+$u^{(j)} = (g_j/g_i)\,u^{(i)}$. The goal is to \emph{select} among them online,
+not to retune them. The soft-mode controller is common to all three and is not
+varied.
+
+\subsection{Observables and scalar reward}\label{sec:pr-reward}
+Performance is assessed on the hard eigenmode only, through two observables: the
+hard-mode error signal $\ehard$ (the controller input/readout) and the hard-mode
+control effort $\Chard$ (the controller output, transformed to the eigenbasis).
+A linear scalarisation of error and control, $J = \alpha\,\mathrm{RMS}(\ehard) +
+\beta\,\mathrm{RMS}(\Chard)$, cannot yield a consistent regime--controller
+preference, because different regimes call for opposite error/control
+trade-offs; a fixed trade-off slope therefore fails. We instead use a
+multiplicative (logarithmic) cost. In its minimal form,
+\begin{equation}
+  J = \rho\,\log\!\frac{\mathrm{RMS}(\ehard)}{\min_C \mathrm{RMS}(\ehard)}
+    + \log\!\frac{\mathrm{RMS}_{10\text{--}30\,\mathrm{Hz}}(\Chard)}
+                 {\min_C \mathrm{RMS}_{10\text{--}30\,\mathrm{Hz}}(\Chard)},
+  \label{eq:logcost}
+\end{equation}
+with a single global coefficient $\rho \approx 1.095$, which already yields the
+intended one-to-one mapping. In the implementation used for the bandit reward we
+adopt a generalised, multi-band form: the error and control signals are
+decomposed into a set of Butterworth frequency bands, and the reward is a
+weighted sum of the log band-powers evaluated on \SI{2}{s} blocks,
+\begin{equation}
+  Z = \sum_i w_i \log b_i, \qquad r_{\mathrm{raw}} = -Z,
+  \label{eq:zreward}
+\end{equation}
+with band features $b_i$ (RMS per band of $\ehard$ and $\Chard$) and fixed
+weights $w_i$ calibrated so as to reproduce the designed mapping. Because the
+downstream policy expects a bounded reward, the per-segment mean raw score is
+mapped to $[0,1]$ by a logistic,
+\begin{equation}
+  r = \big[\,1 + \exp\!\big(-(\bar r_{\mathrm{raw}} - r_0)/\sigma_0\big)\big]^{-1},
+  \qquad r_0 = 167.5,\ \sigma_0 = 2.5.
+  \label{eq:logistic}
+\end{equation}
+The implications of this normalisation are examined in
+Section~\ref{sec:reward}.
+
+\subsection{Designed regime--controller mapping}\label{sec:pr-map}
+The regimes and controllers are constructed so that, under the cost of
+Eq.~\eqref{eq:logcost}--\eqref{eq:zreward}, each regime has a distinct optimal
+controller: $R_0 \to \Cz$, $R_1 \to \Co$, $R_2 \to \Ct$. Physically, the noisy
+sensor of $R_0$ favours the low-gain controller (which injects less control
+noise), while the clean sensor and elevated seismic input of $R_2$ favour the
+high-gain controller (which rejects the larger disturbance). The accuracy of
+this mapping is the subject of Section~\ref{sec:reward}.
+
+% =====================================================================
+\section{Characterisation of the reward landscape}\label{sec:reward}
+% ---------------------------------------------------------------------
+We characterise the reward of every controller in every regime by simulating
+all nine (regime, controller) combinations. The band features are obtained by
+filtering each error/control signal \emph{continuously} (the band-pass filter
+state is carried across the run; the lowest band, $0.05$--$0.3$\,Hz, carries the
+largest weight and requires this), and the reward of Eq.~\eqref{eq:zreward} is
+the mean over \SI{2}{s} blocks. Statistics are accumulated over five independent
+noise realisations of \SI{360}{s} each (a \SI{60}{s} filter warm-up discarded;
+$\sim$\,$750$ settled blocks per cell). Table~\ref{tab:reward} reports the mean
+raw and logistic-mapped reward;
+Fig.~\ref{fig:reward} shows the per-controller distributions and means.
+
+\begin{table}[t]
+  \centering
+  \caption{Mean reward per (regime, controller). Raw score $r_{\mathrm{raw}}$
+  [Eq.~\eqref{eq:zreward}] and logistic (bandit-space) reward
+  [Eq.~\eqref{eq:logistic}]. Bold marks the per-regime optimum.}
+  \label{tab:reward}
+  \begin{tabular}{l ccc c ccc}
+    \toprule
+     & \multicolumn{3}{c}{raw $r_{\mathrm{raw}}$} & & \multicolumn{3}{c}{logistic $r$} \\
+     \cmidrule(lr){2-4}\cmidrule(lr){6-8}
+     & $\Cz$ & $\Co$ & $\Ct$ & & $\Cz$ & $\Co$ & $\Ct$ \\
+    \midrule
+    $R_0$ & \textbf{168.59} & 167.75 & 167.38 & & \textbf{0.597} & 0.521 & 0.487 \\
+    $R_1$ & 165.52 & \textbf{165.68} & 165.39 & & 0.325 & \textbf{0.338} & 0.314 \\
+    $R_2$ & 167.43 & 168.23 & \textbf{168.28} & & 0.492 & 0.565 & \textbf{0.569} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{../paper_characterization/mean_reward_bars.png}
+  \caption{Mean reward per regime and controller, in the raw score
+  (left, with standard-error bars) and in the logistic bandit-reward space
+  (right). The diagonal (regime-optimal) controller is the largest in each
+  regime, and the logistic reward is non-saturating (all values $0.31$--$0.60$).}
+  \label{fig:reward}
+\end{figure}
+
+Three features stand out. First, the designed one-to-one mapping holds in
+\emph{all three} regimes: $R_0\to\Cz$, $R_1\to\Co$ and $R_2\to\Ct$ are each the
+per-regime optimum (Table~\ref{tab:reward}). Second, the separation is
+regime-dependent. It is large and highly robust in the nominal regime $R_0$
+(raw gap $0.84$, $\sim$\,$35\sigma$ over noise realisations) and robust in the
+intermediate regime $R_1$ (gap $0.16$, $\sim$\,$4.5\sigma$), but marginal in the
+extreme regime $R_2$, where $\Co$ and $\Ct$ are nearly equivalent (gap $0.05$,
+$\sim$\,$0.8\sigma$). Because $\Co$ and $\Ct$ are close in $R_2$, the per-step
+regret of confusing them is small and contributes little to the integrated cost.
+Third, with the corrected continuous-filter reward the logistic normalisation of
+Eq.~\eqref{eq:logistic}, centred at $r_0 = 167.5$, is \emph{non-saturating} over
+the reward range ($\approx 165$--$169$): the bandit-space rewards span
+$0.31$--$0.60$ across all regimes (Fig.~\ref{fig:reward}, right), so the
+per-regime separation is preserved rather than compressed. A learnable signal is
+therefore present in every regime---strongest in the nominal regime, weakest in
+the extreme regime---which is what makes the online-selection problem well posed.
+
+% =====================================================================
+\section{Dynamics of controller switching}\label{sec:switch}
+% ---------------------------------------------------------------------
+A controller switch perturbs the loop transiently. To quantify this cost in
+isolation from the (separate) steady-state reward difference between
+controllers, we use a common-random-numbers design. For a transition
+$C_i \to C_j$ we run a \emph{switch} simulation ($C_i$ for a warm-up
+$T_{\mathrm{w}}$, then $C_j$) and an \emph{always-}$C_j$ reference on the
+\emph{identical} noise realisation, and form the post-switch reward difference
+\begin{equation}
+  \Delta r(t) = r_{\mathrm{switch}}(t) - r_{\mathrm{always}\text{-}C_j}(t).
+  \label{eq:dR}
+\end{equation}
+After the switch both runs apply $C_j$ on the same noise, so the steady-state
+reward of $C_j$ cancels and $\Delta r$ isolates the transient; that
+$\Delta r(t)\to 0$ at long times (Fig.~\ref{fig:transient}) confirms the
+cancellation. We report the dip depth $\min_t \Delta r$ and the integrated
+loss $\int \Delta r\,\mathrm{d}t$, averaged over six seeds, with $T_{\mathrm{w}}
+= \SI{64}{s}$ (long enough for the continuous reward filters to settle) and a
+\SI{40}{s} test window. All runs use the validated fast kernel and the corrected
+continuous-filter reward.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.78\linewidth]{../switching_dynamics/fig1_R0_transitions_ramp.png}
+  \caption{Switching transient $\Delta r(t)$ in $R_0$ for all six transitions,
+  with the realistic bumpless-ramp handover. The dip is shallow ($\lesssim 0.6$
+  in reward) and recovers within a few seconds for every transition, so the
+  switch cost is small under a proper handover.}
+  \label{fig:transient}
+\end{figure}
+
+\subsection{Transient cost and its asymmetry}\label{sec:sw-cost}
+A switch produces a brief reward dip; the loop remains stable throughout (no
+divergence). With the \emph{naive} handovers the cost is strongly asymmetric in
+the direction of the gain change: gain-\emph{decreasing} switches (from a higher-
+to a lower-gain controller) are far costlier than gain-increasing ones, the
+extreme case in $R_0$ being $\Ct\!\to\!\Cz$ (the largest gain drop), which
+reflects the abrupt re-equilibration of the loop when the effective gain changes
+discontinuously. With the realistic handovers this asymmetry is largely removed
+(Fig.~\ref{fig:transient}): every transition incurs only a shallow, few-second
+dip.
+
+\subsection{Dependence on the handover implementation}\label{sec:sw-handover}
+The magnitude of the transient depends far more on \emph{how} the controller is
+handed over than on the transition itself. We compare four implementations of
+the switch:
+\begin{itemize}
+  \item \textbf{naive carry-over (``hot'')}: the outgoing controller's internal
+  filter state is transferred verbatim into the incoming controller. Because the
+  gain difference resides in an internal filter section, the carried state is
+  mis-scaled and the transient is \emph{worsened}.
+  \item \textbf{state reset (``cold'')}: the incoming controller's filter state
+  is zeroed. In a digital control system this produces an output discontinuity
+  and an actuator impulse, and is not representative of switching a loop that
+  must remain locked.
+  \item \textbf{parallel banks}: all candidate controllers run continuously on
+  the same error, each maintaining its own state; only the active output drives
+  the suspensions. A switch changes which output is applied, producing a clean
+  $(g_j/g_i)$ step in actuation.
+  \item \textbf{bumpless ramp}: as parallel banks, but the applied command is
+  cross-faded between the outgoing and incoming controller outputs over a short
+  window, $u(t) = (1-\alpha)\,u^{(i)}(t) + \alpha\,u^{(j)}(t)$ with $\alpha:
+  0\!\to\!1$. For this gain family the blend is exactly a continuous slew of the
+  effective loop gain from $g_i$ to $g_j$, and is stable provided the loop has
+  gain margin across the range. This models the gain-ramped, parallel-filter-bank
+  handover used in detector digital-control systems.
+\end{itemize}
+Table~\ref{tab:handover} and Fig.~\ref{fig:handover} compare these on the worst
+relevant case, $\Ct\!\to\!\Cz$ (a switch into the $R_0$ optimum). The integrated
+loss spans more than two orders of magnitude: the naive carry-over is by far the
+worst, state reset and parallel banks are comparable and moderate, and a short
+($\sim$\,\SI{2}{s}) bumpless ramp very nearly eliminates the transient.
+
+\begin{table}[t]
+  \centering
+  \caption{Switching cost for $\Ct\!\to\!\Cz$ in $R_0$ (gain ratio $0.60$) by
+  handover implementation. Integrated loss in (raw score)$\cdot$\si{s}; dip in
+  raw score.}
+  \label{tab:handover}
+  \begin{tabular}{lccl}
+    \toprule
+    Handover & integrated loss & dip depth & realism \\
+    \midrule
+    naive carry-over (hot)    & $-140$  & $-20.3$ & implementation artifact \\
+    state reset (cold)        & $-8.4$  & $-3.3$  & actuator impulse; unrealistic in lock \\
+    parallel banks            & $-5.1$  & $-2.2$  & realistic; gain-step \\
+    bumpless ramp, \SI{8}{s}  & $-2.8$  & $-1.1$  & realistic; smooth \\
+    bumpless ramp, \SI{2}{s}  & $\mathbf{+0.2}$ & $\mathbf{-0.6}$ & realistic; near-eliminated \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{../switching_dynamics/fig6_handover_modes.png}
+  \caption{Switching transient by handover implementation, for
+  $\Ct\!\to\!\Cz$ (left) and $\Cz\!\to\!\Ct$ (right) in $R_0$. A bumpless ramp
+  (orange/purple) suppresses the transient that the naive carry-over (blue) and,
+  to a lesser extent, the state reset (red) and parallel-bank (green) handovers
+  exhibit.}
+  \label{fig:handover}
+\end{figure}
+
+The central conclusion is that the apparent switching penalty is, for this
+controller family, largely an artifact of the handover \emph{implementation}
+rather than an intrinsic physical cost. With a bumpless, parallel-bank handover
+the per-switch transient (integrated loss $\lesssim 1$ in reward$\cdot$s; a
+few-second dip of $\lesssim 0.6$) is small: averaged over a hold window of
+hundreds of seconds it shifts the window-mean reward by far less than the
+per-regime separation between controllers (Section~\ref{sec:reward}), so an
+online policy can switch freely. Two qualifications apply. First, this relies on the
+controllers forming a gain family, for which the cross-fade is provably a smooth
+gain slew; for controllers of different shape---e.g.\ future learned
+controllers---a convex blend of two stabilising controllers is not guaranteed to
+be stabilising mid-ramp, and the switching cost must be re-measured. Second, even
+an ideal handover cannot remove the physical re-equilibration of the loop to a
+different closed-loop bandwidth; the recovery times of a few seconds reflect this
+irreducible component.
+
+% =====================================================================
+\section{Online controller selection}\label{sec:bandit}
+% ---------------------------------------------------------------------
+\todo{This section reports the bandit experiments and is not yet complete.}
+
+\subsection{Algorithms}\label{sec:ba-algos}
+We compare an actively adaptive, distribution-change-detecting policy
+(AdSwitch~\cite{AdSwitch}), which makes no assumptions about the
+regime-switching statistics, against (i) a Bayesian policy exploiting milder
+statistical structure (Thompson sampling, possibly contextual)
+\cite{Thompson,RussoTutorial}; (ii) passively forgetting baselines (discounted
+and sliding-window UCB)~\cite{GarivierMoulines}; and the reference baselines
+(iii) each fixed controller, (iv) an oracle that always plays the per-regime
+optimum, and (v) a simple forecast-driven rule mimicking current operational
+practice. \todo{finalise the algorithm set and the choice of the main method.}
+
+\subsection{Experimental protocol}\label{sec:ba-protocol}
+The environment evolves \emph{adiabatically} between regimes (slow ramps and
+holds rather than abrupt steps); the controller is held fixed within each
+decision interval of duration $T_{\mathrm{hold}}$ and the bandit is updated with
+the segment-mean reward; switching uses the bumpless handover of
+Section~\ref{sec:sw-handover}. The figure of merit is the cumulative
+(time-integrated) reward over long horizons, and the per-step regret against the
+time-varying optimum, decomposed into wrong-arm and switching-cost
+contributions. \todo{specify $T_{\mathrm{hold}}$, horizon, the non-stationarity
+model and its parameters, and the number of repetitions.}
+
+\subsection{Results}\label{sec:ba-results}
+\todo{Cumulative-reward curves and regret table for all policies; sensitivity to
+$T_{\mathrm{hold}}$ and to the regime-switching rate.}
+
+% =====================================================================
+\section{Discussion}\label{sec:discussion}
+% ---------------------------------------------------------------------
+The infrastructure and measurements above delimit what an online controller-
+selection policy can and cannot achieve in this setting. The regime--controller
+problem is well posed, with the one-to-one mapping holding in all three regimes
+and a non-saturating reward; the per-regime separation is largest in the nominal
+regime and smallest (though still favouring the designed controller) in the
+extreme regime, so the achievable advantage of a selection policy is modest and
+accrues across all regimes. At the same time, with a realistic bumpless handover the cost of
+switching is small, so regret is governed primarily by \emph{which} controller is
+chosen rather than by the act of switching. These two observations frame the
+bandit comparison of Section~\ref{sec:bandit}: the relevant question is how
+quickly and reliably a policy identifies the regime-optimal controller as the
+environment drifts, with switching essentially free.
+\todo{expand once bandit results are in; comment on algorithm choice and on the
+path to learned (NN) controllers, for which the reward separation is expected to
+be larger and the switching cost must be re-assessed.}
+
+% =====================================================================
+\section{Conclusion}\label{sec:conclusion}
+% ---------------------------------------------------------------------
+\todo{Summarise contributions and the bandit outcome; restate the headline that
+switching is nearly free under a proper handover, and the implications for
+autonomous alignment control.}
+
+% =====================================================================
+\section*{Acknowledgements}
+\todo{funding and computing acknowledgements.}
+
+% =====================================================================
+\begin{thebibliography}{99}
+\bibitem{aLIGO} J.~Aasi \emph{et al.} (LIGO Scientific Collaboration),
+  \emph{Advanced LIGO}, Class.\ Quantum Grav.\ \textbf{32}, 074001 (2015).
+\bibitem{aVirgo} F.~Acernese \emph{et al.} (Virgo Collaboration),
+  \emph{Advanced Virgo: a second-generation interferometric gravitational wave
+  detector}, Class.\ Quantum Grav.\ \textbf{32}, 024001 (2015).
+\bibitem{SidlesSigg} J.~A.~Sidles and D.~Sigg,
+  \emph{Optical torques in suspended Fabry--Perot interferometers},
+  Phys.\ Lett.\ A \textbf{354}, 167 (2006).
+\bibitem{Barsotti} L.~Barsotti, M.~Evans, and P.~Fritschel,
+  \emph{Alignment sensing and control in advanced LIGO},
+  Class.\ Quantum Grav.\ \textbf{27}, 084026 (2010).
+\bibitem{Lattimore} T.~Lattimore and C.~Szepesv\'ari,
+  \emph{Bandit Algorithms}, Cambridge University Press (2020).
+\bibitem{GarivierMoulines} A.~Garivier and E.~Moulines,
+  \emph{On upper-confidence bound policies for switching bandit problems},
+  in \emph{Algorithmic Learning Theory} (2011), p.~174.
+\bibitem{AdSwitch} P.~Auer, P.~Gajane, and R.~Ortner,
+  \emph{Adaptively tracking the best bandit arm with an unknown number of
+  distribution changes}, in \emph{Proc.\ COLT} (2019).
+\bibitem{Thompson} W.~R.~Thompson,
+  \emph{On the likelihood that one unknown probability exceeds another in view
+  of the evidence of two samples}, Biometrika \textbf{25}, 285 (1933).
+\bibitem{RussoTutorial} D.~Russo \emph{et al.},
+  \emph{A tutorial on Thompson sampling},
+  Found.\ Trends Mach.\ Learn.\ \textbf{11}, 1 (2018).
+\bibitem{Harms_internal} \todo{replace with a citable reference (or remove)
+  for the adiabatic-non-stationarity argument.}
+\end{thebibliography}
+
+\end{document}

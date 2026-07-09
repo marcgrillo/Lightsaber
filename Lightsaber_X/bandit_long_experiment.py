@@ -391,7 +391,8 @@ def write_outputs(outdir, results, cache, oracle_table, hold):
     hold_n = int(hold * fs)
     Wsec = np.asarray(cache['Wsec']); tsec = np.asarray(cache['tsec'])
     ndec = min(len(v['rewards']) for v in results.values())
-    dec_t = (np.arange(ndec) * hold_n) / fs
+    # int64: ndec*hold_n exceeds int32 beyond ~97 days (np.arange defaults to int32 on Windows)
+    dec_t = (np.arange(ndec, dtype=np.int64) * hold_n) / fs
     Wdec = np.vstack([np.interp(dec_t, tsec, Wsec[i]) for i in range(3)])     # (3, ndec)
     opt_arm = np.argmax(oracle_table @ Wdec, axis=0)                          # (ndec,)
     sev = 1.0 * Wdec[1] + 2.0 * Wdec[2]
@@ -457,7 +458,7 @@ def write_outputs(outdir, results, cache, oracle_table, hold):
     if diag_name:
         v = results[diag_name]
         fig, ax = plt.subplots(2, 1, figsize=(13, 5), sharex=True)
-        td = (np.arange(len(v['tar_J'])) * hold_n) / fs / 86400
+        td = (np.arange(len(v['tar_J']), dtype=np.int64) * hold_n) / fs / 86400
         ax[0].plot(td, v['tar_J'], 'tab:red'); ax[0].set_ylabel("library size J"); ax[0].grid(alpha=0.3)
         ax[0].set_title(f"{diag_name}: recurrent-regime library and mode")
         ax[1].plot(td, v['tar_mode'], 'tab:blue', lw=0.6)

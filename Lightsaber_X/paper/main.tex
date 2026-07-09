@@ -18,6 +18,8 @@
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 \usepackage{authblk}
 
+\emergencystretch=2em % prefer stretched spaces over margin overflow
+
 % Lightweight unit macro (avoids the siunitx dependency); works in math and text.
 \newcommand{\SI}[2]{#1\,\text{#2}}
 \newcommand{\si}[1]{\text{#1}}
@@ -68,8 +70,15 @@ most importantly, we show that the apparent switching penalty is dominated by
 the \emph{controller-handover implementation}: a naive state reset or raw
 state carry-over produces large transients, whereas a bumpless, parallel-bank
 handover renders the switching cost negligible for this gain-scaled controller
-family. \todo{Add one or two sentences summarising the bandit-comparison
-results (AdSwitch vs.\ alternatives) once available.}
+family. Finally, we introduce \emph{Recurrence-Aware Thompson Sampling}
+(RA-TS-F), a minimal policy combining Thompson sampling with a drift detector, a
+library of per-regime posteriors that are \emph{resumed} when a regime recurs,
+and a bounded coverage probe. On one-week and six-month simulated benchmarks
+RA-TS-F attains the lowest regret of all policies tested---non-stationary bandit
+baselines, change-detection methods, an operator-like rule, and every fixed
+controller---capturing $74$--$83\%$ of the oracle's achievable advantage over
+the best fixed controller while switching $2.8\times$ less often than the
+strongest change-detection alternative.
 \end{abstract}
 
 % =====================================================================
@@ -133,10 +142,14 @@ Our contributions are:
   feasibility of online switching---the dependence of this cost on the
   controller-handover implementation, with the conclusion that a realistic
   bumpless handover makes switching nearly free.
+  \item An online-selection policy, \emph{Recurrence-Aware Thompson Sampling
+  with a coverage floor} (RA-TS-F), designed around the structure established in
+  1--3: regimes recur, their identity is carried by the \emph{shape} of the
+  per-arm rewards rather than their level, and switching is cheap. On one-week
+  and six-month benchmarks with a common noise realisation across policies,
+  RA-TS-F attains the lowest regret of every policy tested
+  (Section~\ref{sec:bandit}).
 \end{enumerate}
-The online-selection experiments that build on this infrastructure are
-described in Section~\ref{sec:bandit}; \todo{state whether they are included in
-this version or deferred}.
 
 % =====================================================================
 \section{Background}\label{sec:background}
@@ -204,7 +217,14 @@ sampling~\cite{Thompson,RussoTutorial}, possibly in a contextual form, may
 exploit structure that the worst-case methods cannot. The appropriate choice
 depends on the regime-switching statistics and the separation of the per-arm
 reward distributions; quantifying the latter is one purpose of
-Section~\ref{sec:reward}.
+Section~\ref{sec:reward}. A third structural feature, central to our setting,
+is \emph{recurrence}: the environment does not drift to ever-new states but
+revisits a small set of regimes. A policy that re-learns each regime from
+scratch on every visit pays the identification cost repeatedly; a policy that
+recognises a returning regime and resumes previously accumulated knowledge pays
+it once. Exploiting recurrence, with change detection in the spirit of
+CUSUM-type tests~\cite{Page}, is the design principle behind the policy of
+Section~\ref{sec:ba-rats}.
 
 % =====================================================================
 \section{Simulation framework}\label{sec:framework}
@@ -353,8 +373,9 @@ largest weight and requires this), and the reward of Eq.~\eqref{eq:zreward} is
 the mean over \SI{2}{s} blocks. Statistics are accumulated over five independent
 noise realisations of \SI{360}{s} each (a \SI{60}{s} filter warm-up discarded;
 $\sim$\,$750$ settled blocks per cell). Table~\ref{tab:reward} reports the mean
-raw and logistic-mapped reward;
-Fig.~\ref{fig:reward} shows the per-controller distributions and means.
+raw and logistic-mapped reward; Fig.~\ref{fig:rewardhist} shows the full
+per-controller reward \emph{distributions} in each regime, and
+Fig.~\ref{fig:reward} the corresponding means.
 
 \begin{table}[t]
   \centering
@@ -374,6 +395,24 @@ Fig.~\ref{fig:reward} shows the per-controller distributions and means.
     \bottomrule
   \end{tabular}
 \end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.8\linewidth]{figs/reward_by_regime_raw.png}
+  \caption{Per-controller distributions of the raw reward score
+  (\SI{2}{s} blocks, continuous-filter convention) in each regime. The
+  distributions are broad and strongly overlapping---the per-block noise is far
+  larger than the mean separations---so a single observation carries little
+  information about the acting regime or the best controller; only
+  window-averaging and accumulation across windows resolve the ordering. Note
+  the regime signatures: in $R_0$ the ordering $\Cz\!>\!\Co\!>\!\Ct$ is visible
+  as a rightward shift of $\Cz$ (blue); in $R_1$ all three distributions nearly
+  coincide (gap $0.16$ raw at $\sigma_{\mathrm{block}}\!\approx\!1.5$); in $R_2$
+  the ordering reverses, with $\Cz$ (blue) shifted left. The \emph{shape} of the
+  mean-reward vector across controllers---not the overall level, which is
+  similar in $R_0$ and $R_2$---is what identifies the regime.}
+  \label{fig:rewardhist}
+\end{figure}
 
 \begin{figure}[t]
   \centering
@@ -401,6 +440,19 @@ $0.31$--$0.60$ across all regimes (Fig.~\ref{fig:reward}, right), so the
 per-regime separation is preserved rather than compressed. A learnable signal is
 therefore present in every regime---strongest in the nominal regime, weakest in
 the extreme regime---which is what makes the online-selection problem well posed.
+
+Fig.~\ref{fig:rewardhist} adds the distributional view that matters for the
+online policy: the per-block reward distributions of the three controllers
+overlap almost entirely in every regime. In the bandit-reward space the
+per-window ($T_{\mathrm{hold}}=\SI{100}{s}$) standard deviation is
+$\hat\sigma \approx 0.041$, comparable to the $R_1$ gap ($0.013$) and much
+larger than the $R_2$ gap ($0.005$): resolving the best arm in the hardest
+regime requires averaging tens of windows per arm. Equally important, the
+achievable reward \emph{levels} of $R_0$ and $R_2$ are similar
+(Table~\ref{tab:reward}); what distinguishes the regimes is the \emph{ordering
+and spacing} of the three controllers---the shape of the per-arm mean-reward
+vector. Both observations directly shape the algorithm design of
+Section~\ref{sec:bandit}.
 
 % =====================================================================
 \section{Dynamics of controller switching}\label{sec:switch}
@@ -525,33 +577,376 @@ irreducible component.
 % =====================================================================
 \section{Online controller selection}\label{sec:bandit}
 % ---------------------------------------------------------------------
-\todo{This section reports the bandit experiments and is not yet complete.}
 
-\subsection{Algorithms}\label{sec:ba-algos}
-We compare an actively adaptive, distribution-change-detecting policy
-(AdSwitch~\cite{AdSwitch}), which makes no assumptions about the
-regime-switching statistics, against (i) a Bayesian policy exploiting milder
-statistical structure (Thompson sampling, possibly contextual)
-\cite{Thompson,RussoTutorial}; (ii) passively forgetting baselines (discounted
-and sliding-window UCB)~\cite{GarivierMoulines}; and the reference baselines
-(iii) each fixed controller, (iv) an oracle that always plays the per-regime
-optimum, and (v) a simple forecast-driven rule mimicking current operational
-practice. \todo{finalise the algorithm set and the choice of the main method.}
+\subsection{The decision problem and its difficulties}\label{sec:ba-problem}
+The policy observes, once per decision window of $T_{\mathrm{hold}}=\SI{100}{s}$,
+a single number: the window-mean reward of the controller it chose to play. It
+observes \emph{nothing else}---no regime label, no seismometer channel, no
+forecast. (Only the reference Oracle is given the true regime mixture.) On this
+information it must repeatedly choose the next controller. The
+characterisation of Sections~\ref{sec:reward}--\ref{sec:switch} makes the
+problem concrete, and hard, in five specific ways.
+
+\begin{enumerate}
+  \item \textbf{Partial observability of the regime.} The regime identity is
+  carried by the \emph{shape} of the per-arm mean-reward vector
+  (Fig.~\ref{fig:rewardhist}), but a policy playing one arm per window sees one
+  coordinate of that vector at a time. Worse, the achievable reward
+  \emph{levels} of $R_0$ and $R_2$ nearly coincide, so a change $R_0
+  \!\leftrightarrow\! R_2$ can be invisible in the reward stream of the
+  currently played arm: detecting it may require playing arms that are
+  currently believed suboptimal.
+  \item \textbf{Noise-to-gap ratio.} The per-window reward noise
+  ($\hat\sigma \approx 0.041$) exceeds the $R_1$ arm gap ($0.013$) and dwarfs
+  the $R_2$ gap ($0.005$). Identification therefore costs many windows, and an
+  algorithm that re-identifies from scratch at every regime visit pays this
+  cost at every visit.
+  \item \textbf{Recurrence.} The environment revisits the same three regimes
+  (Section~\ref{sec:bg-env}) hundreds of times over months. This is the
+  structure a good policy must exploit: knowledge accumulated in past visits
+  of a regime remains valid and should be \emph{resumed}, not re-learned.
+  \item \textbf{Continuous transitions.} Regime changes are ramps, not jumps
+  (the adiabatic principle of Section~\ref{sec:bg-env}). During deep
+  transitions the reward of \emph{every} arm collapses transiently; a
+  change detector tuned only for level drops can mistake the collapsed,
+  uniformly flat reward landscape for a new stationary regime and corrupt its
+  statistics---a failure mode we repeatedly observed in earlier designs
+  (Section~\ref{sec:ba-algos}).
+  \item \textbf{Short episodes.} $R_1$ storms last tens of minutes: an
+  identification procedure whose budget exceeds the episode length never
+  learns that regime at all, no matter how statistically sound it is.
+\end{enumerate}
+
+Two facts work in the policy's favour. Switching is nearly free under the
+bumpless handover (Section~\ref{sec:switch}), so exploration is cheap at the
+actuation level; and the number of distinct regimes is small, so a memory of
+per-regime statistics is compact. The design question is therefore not
+``how to forget the past'' (the premise of discounted methods) but ``how to
+\emph{file} the past under the right regime and retrieve it on recurrence.''
+
+\subsection{Policies compared}\label{sec:ba-algos}
+We benchmark four groups of policies, all consuming the identical reward
+stream defined above.
+
+\paragraph{References.} Each \textbf{fixed controller} $\Cz,\Co,\Ct$; an
+\textbf{Oracle} that is given the true regime mixture at each decision and
+plays the argmax of the calibrated reward table (upper bound); and a
+\textbf{rule-based} policy modelling current operator practice: an
+exponentially weighted moving average of the observed reward triggers an alarm
+when it stays below a calibrated floor, a routine re-check fires periodically
+regardless, and either trigger starts a short round-robin probe of all
+controllers, committing to the best measured. By construction this baseline is
+blind to level-preserving regime changes (difficulty~1) except through its
+periodic re-check.
+
+\paragraph{Passively forgetting bandits.} Discounted UCB~\cite{GarivierMoulines}
+and discounted (Gaussian) Thompson sampling~\cite{Thompson,RussoTutorial}, both
+with discount $\gamma = 0.999$; a sweep over $\gamma$ did not qualitatively
+change their behaviour. These treat non-stationarity as generic drift and
+carry no regime memory.
+
+\paragraph{Change-detection policies with regime libraries.} Two in-house
+designs developed en route to the final method, each fixing its predecessor's
+observed failure. \textbf{TAR-UCB} augments UCB with a drift detector and a
+library of regime fingerprints, but matches regimes partly by reward
+\emph{level} and is confused by level-preserving changes. \textbf{LI-TAR-UCB}
+makes recognition \emph{level-invariant} (matching centred per-arm reward
+shapes), adds a scheduled low-rate probe of non-played arms to catch silent
+$R_0\!\leftrightarrow\!R_2$ changes, and guards its detector against the
+transition-collapse failure (difficulty~4) with a symmetric (rise and fall)
+test and a floor that discards uninformative collapsed windows.
+We also implemented an identify-then-commit family (\textbf{CG-ICLB} and
+variants), which separates explicit regime identification from a certification
+step that must statistically confirm the best arm before committing to it; its
+best variants certify by top-two Thompson sampling (\textbf{-TT}) or drop
+certification entirely and resume per-regime posteriors (\textbf{-R2}). The
+lesson from this progression, developed next, is that most of this machinery
+can be removed.
+
+\subsection{Recurrence-Aware Thompson Sampling (RA-TS-F)}\label{sec:ba-rats}
+RA-TS-F is the distillation of the above development: \emph{just} Thompson
+sampling, a drift detector, and a library of per-regime posteriors, arranged so
+that regime identification \emph{emerges} from Thompson sampling's own
+exploration. It has two internal modes.
+
+\paragraph{TRACK.} The policy believes the environment is in a known regime
+$g$ and runs standard Gaussian Thompson sampling on that regime's
+\emph{accumulated} posterior: for each arm $a$, with $n_{g,a}$ past rewards
+summing to $s_{g,a}$, the posterior over the mean reward is the conjugate
+\begin{equation}
+  \mu_{g,a} \,\big|\, \mathcal D \;\sim\; \mathcal N\!\left(
+  \frac{\mu_0/\tau_0^2 + s_{g,a}/\hat\sigma^2}{1/\tau_0^2 + n_{g,a}/\hat\sigma^2},
+  \;\Big(1/\tau_0^2 + n_{g,a}/\hat\sigma^2\Big)^{-1}\right),
+  \label{eq:posterior}
+\end{equation}
+and the played arm is the argmax of one sample per arm. Exploitation
+therefore becomes near-deterministic as evidence accumulates---\emph{without}
+any explicit commit step---while a persistent small exploration probability
+remains wherever arms are genuinely close (as in $R_2$), which is exactly
+where exploration stays cheap. Each observed reward also feeds a per-arm
+CUSUM~\cite{Page} drift statistic
+\begin{equation}
+  G_a \leftarrow \max\!\big(0,\; G_a + |r - b_a| - \nu\big), \qquad
+  \text{alarm when } G_a \ge h,
+  \label{eq:cusum}
+\end{equation}
+where $b$ is a \emph{frozen snapshot} of the regime's per-arm means taken when
+the regime was adopted (so the detector cannot blind itself by tracking the
+drift it is meant to detect), $\nu = 1.3\,\hat\sigma$ is a slack absorbing
+noise, and $h = 8\,\hat\sigma$ sets the detection-delay/false-alarm trade-off.
+An alarm empties the working state and enters ACQUIRE; the library entry keeps
+its evidence.
+
+\paragraph{ACQUIRE.} After an alarm (or at start-up) the working posterior is
+reset to a diffuse prior ($\tau_0 = 0.5$), so Thompson sampling naturally
+rotates across arms. A \emph{bounded coverage floor}---the ``-F'' in
+RA-TS-F---plays the least-sampled arm whenever some arm has fewer than
+$n_{\min}=3$ samples; this is the entire forced-exploration budget, at most
+$n_{\min}K = 9$ windows per re-acquisition. Once covered, the centred shape of
+the acquisition estimate, $\psi = \hat\mu - \overline{\hat\mu}$, is compared
+with the centred shape of every library regime; centring cancels any common
+reward level, making recognition level-invariant by construction
+(difficulty~1). The nearest regime is \emph{resumed}---its posterior restored
+and the acquisition samples folded in---only if it matches within a tolerance
+($0.8\,\Delta_{\mathrm{sh}}$, with $\Delta_{\mathrm{sh}} \approx 0.053$ the
+calibrated minimum shape separation between regimes) \emph{and} beats the
+runner-up by a margin ($0.4\,\Delta_{\mathrm{sh}}$); a shape separated from
+every known regime, once matured ($n_{\mathrm{new}}=8$ samples per arm),
+founds a new library entry. There is no scheduled probe, no certification
+test, no explicit level estimate, and no assumed number of regimes.
+
+Why this works here can be read off the difficulty list: recurrence is
+exploited by resuming posteriors, so the noise-to-gap cost (difficulty~2) is
+paid once per regime rather than once per visit; level-invariant shape matching
+handles the level-degenerate $R_0/R_2$ pair; the coverage floor guarantees the
+few loser-arm samples that identification needs; and because acquisition is
+Thompson sampling itself, the exploration performed while identifying is
+simultaneously near-optimal exploitation---identification is not a separate
+tax, unlike the balanced-block or certification phases of the CG-ICLB family.
+The floor is not optional: plain RA-TS (identical but with the floor disabled)
+\emph{stalls}, because Thompson sampling's very purpose is to stop playing
+losing arms, so arm coverage is never reached, identification never completes,
+and the policy degenerates to nearly-fixed play (85--129 switches per week
+against RA-TS-F's $\sim$\,850; regret $3.6$--$5.9\times$ worse,
+Table~\ref{tab:week}).
+
+Fig.~\ref{fig:ratsdemo} shows the mechanism on an instrumented synthetic run
+with three recurring regimes: the CUSUM statistic of the played arm rests near
+zero within regimes, rises sharply at each hidden switch, and every alarm is
+followed by a brief probe (the shaded ACQUIRE windows, a few steps each) after
+which the correct regime is re-adopted and the optimal arm resumed.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figs/rats_overview.png}
+  \caption{RA-TS-F mechanics on an instrumented run with three recurring
+  regimes (synthetic rewards, same calibration as the production runs). From
+  top: true and tracked regime; played arm vs.\ true best arm, with ACQUIRE
+  probes shaded; per-step detector residual $|r - b_a|$ against the CUSUM slack
+  $\nu$; CUSUM statistic $G$ with threshold $h$ and alarms. Every hidden regime
+  switch drives $G$ over threshold within a few decisions; the subsequent
+  ACQUIRE probe lasts only a handful of windows before the returning regime is
+  recognised (shape match) and its posterior resumed.}
+  \label{fig:ratsdemo}
+\end{figure}
 
 \subsection{Experimental protocol}\label{sec:ba-protocol}
-The environment evolves \emph{adiabatically} between regimes (slow ramps and
-holds rather than abrupt steps); the controller is held fixed within each
-decision interval of duration $T_{\mathrm{hold}}$ and the bandit is updated with
-the segment-mean reward; switching uses the bumpless handover of
-Section~\ref{sec:sw-handover}. The figure of merit is the cumulative
-(time-integrated) reward over long horizons, and the per-step regret against the
-time-varying optimum, decomposed into wrong-arm and switching-cost
-contributions. \todo{specify $T_{\mathrm{hold}}$, horizon, the non-stationarity
-model and its parameters, and the number of repetitions.}
+All policies are run on \emph{identical}, pre-generated noise realisations
+(common random numbers): the regime schedule, injected suspension noise, input
+power, and per-window sensing noise are shared sample-by-sample, so policies
+differ only through their choices, and cumulative-reward differences are
+paired. The controller is held fixed within each $T_{\mathrm{hold}}=\SI{100}{s}$
+window; switching uses the \SI{2}{s} bumpless handover; the reward filters run
+continuously across the whole horizon (Section~\ref{sec:reward}). We use three
+benchmarks: two one-week environments differing in storm frequency
+(\emph{r1long}: one $R_1$ event per day on average; \emph{r1freq}: two per
+day---roughly twice the regime switches), and one six-month environment
+($1.55\times10^7$\,s, $\sim$\,$1.6\times10^5$ decisions, $181$ storm events and
+$\sim$\,$3600$ diurnal drift transitions). The figure of merit is cumulative
+regret against the Oracle; we also report the total number of controller
+switches and the fraction of windows on the true optimal arm.
 
-\subsection{Results}\label{sec:ba-results}
-\todo{Cumulative-reward curves and regret table for all policies; sensitivity to
-$T_{\mathrm{hold}}$ and to the regime-switching rate.}
+\subsection{Results: one-week benchmarks}\label{sec:ba-results}
+
+\begin{table}[t]
+  \centering
+  \caption{One-week benchmarks: cumulative regret vs.\ the Oracle (lower is
+  better) and number of controller switches, on the identical noise realisation
+  per column. $\sim$\,$6000$ decisions per run. Oracle cumulative reward:
+  $2153.9$ (r1long), $2138.6$ (r1freq).}
+  \label{tab:week}
+  \begin{tabular}{l cc c cc}
+    \toprule
+     & \multicolumn{2}{c}{regret} & & \multicolumn{2}{c}{switches} \\
+     \cmidrule(lr){2-3}\cmidrule(lr){5-6}
+    policy & r1long & r1freq & & r1long & r1freq \\
+    \midrule
+    \textbf{RA-TS-F}            & $\mathbf{40.7}$ & $\mathbf{25.8}$ & & 896  & 820 \\
+    RA-TS-FR (rollback)         & 40.6  & 37.8  & & 959  & 1188 \\
+    RA-TS-FQ (delayed commit)   & 41.1  & 39.3  & & 1058 & 1020 \\
+    RA-TS (no coverage floor)   & 147.0 & 152.2 & & 85   & 129 \\
+    \midrule
+    CG-ICLB-TT                  & 57.3  & 65.3  & & 1503 & 1839 \\
+    CG-ICLB-R2                  & 58.1  & 79.5  & & 1226 & 1801 \\
+    LI-TAR-UCB                  & 96.0  & 84.0  & & 2085 & 2159 \\
+    TAR-UCB                     & 154.8 & 132.0 & & 1156 & 1107 \\
+    \midrule
+    Rule-based                  & 125.1 & 175.6 & & 68   & 64  \\
+    D-UCB                       & 159.6 & 154.1 & & 1985 & 2047 \\
+    Thompson (discounted)       & 176.8 & 170.6 & & 33   & 31  \\
+    \midrule
+    Fixed-$\Cz$                 & 155.9 & 151.2 & & 0 & 0 \\
+    Fixed-$\Co$                 & 191.0 & 188.7 & & 0 & 0 \\
+    Fixed-$\Ct$                 & 217.2 & 216.1 & & 0 & 0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/week_regret_curves.png}
+  \caption{Cumulative regret against the Oracle over the two one-week
+  benchmarks, for the leading policies. RA-TS-F (green) accumulates regret at
+  the lowest and most uniform rate on both; RA-TS without the coverage floor
+  (grey dashed) stalls and tracks the fixed-controller slope. Note LI-TAR-UCB's
+  early steep segment on r1long (days 0--1: paying its identification cost) and
+  the stepped growth of the stalled RA-TS, each step a mis-handled regime
+  episode.}
+  \label{fig:weekregret}
+\end{figure}
+
+RA-TS-F attains the lowest regret on both caches (Table~\ref{tab:week},
+Fig.~\ref{fig:weekregret}), and---important for robustness---its advantage
+\emph{grows} on the harder, more frequently switching cache: regret $25.8$ on
+r1freq against $65.3$ for the best identify-and-commit variant and $84.0$ for
+LI-TAR-UCB. This is the recurrence dividend: with switches twice as frequent,
+policies that re-pay an identification or certification cost per episode lose
+twice as much, while RA-TS-F's per-episode cost is a few probe windows followed
+by a posterior resume. Measured against the best fixed controller ($\Cz$,
+regret $155.9$/$151.2$), RA-TS-F captures $74\%$/$83\%$ of the achievable
+Oracle advantage. The rule-based operator baseline degrades sharply with switching
+frequency ($125 \to 176$), quantifying the cost of level-blind,
+schedule-driven re-checking; the passively forgetting bandits are barely
+better than the best fixed arm on either cache, confirming that generic
+forgetting cannot exploit this environment's structure.
+
+The two purity-preserving ablations of RA-TS-F probe whether library
+contamination---post-switch samples committed to the old regime during the
+detection delay---matters in practice. Rollback (FR) retroactively un-commits
+the change-point run on each alarm; delayed commit (FQ) quarantines samples for
+$q=10$ rounds. Neither helps: both match RA-TS-F on r1long and lose on r1freq
+(where FQ's stale posterior and FR's discarded evidence cost most), so the
+plain tolerance-based design is not merely simpler but empirically the best of
+the three.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/week_internals_r1long.png}
+  \caption{RA-TS-F internals over the r1long week. From top: true regime
+  sequence (38 switches); fraction of decisions spent in ACQUIRE (probing),
+  $9.4\%$ overall, concentrated in short bursts at regime boundaries; library
+  size $J$, stabilising by day 1.7 (at $J=8$: the three true regimes plus
+  noise-split duplicates, see text); rolling fraction-optimal for RA-TS-F and
+  the two strongest competitors. RA-TS-F recovers to near-optimal play within
+  each regime episode; CG-ICLB-TT's certification phases are visible as
+  depressed stretches (days 0.3--1.7).}
+  \label{fig:weekinternals}
+\end{figure}
+
+Fig.~\ref{fig:weekinternals} dissects \emph{how} RA-TS-F spends its budget on
+r1long. Probing (ACQUIRE) accounts for $9.4\%$ of decisions and is concentrated
+in short bursts at the regime boundaries---between alarms the policy is pure
+warm-posterior exploitation. The library stabilises within two days and no new
+entries are created for the remaining five. Its final size is $J=8$ rather
+than $3$: with $n_{\min}=3$ probe samples per arm, the shape-estimate noise is
+comparable to the small calibrated separation $\Delta_{\mathrm{sh}}$, so a
+recurring regime occasionally fails its match margin and founds a duplicate
+entry. Duplicates are benign---each converges to the same best arm, and the
+regret cost of maturing one is a few windows---but they mark the price of
+identifying from only $n_{\min}K$ noisy samples; we return to this at the
+six-month scale.
+
+\subsection{Results: six-month run}\label{sec:ba-sixmo}
+
+\begin{table}[t]
+  \centering
+  \caption{Six-month run ($180$ days, $155{,}519$ decisions, identical noise
+  realisation for all policies): cumulative regret vs.\ the Oracle, fraction of
+  windows on the true optimal arm, and number of switches. Oracle cumulative
+  reward $57106.4$.}
+  \label{tab:sixmo}
+  \begin{tabular}{l r r r}
+    \toprule
+    policy & regret & frac.\ optimal & switches \\
+    \midrule
+    Oracle             & $0$      & $0.994$ & $865$ \\
+    \textbf{RA-TS-F}   & $\mathbf{861.5}$ & $0.480$ & $16{,}959$ \\
+    LI-TAR-UCB         & $2138.5$ & $0.430$ & $47{,}534$ \\
+    Rule-based         & $3702.9$ & $0.371$ & $1683$ \\
+    Fixed-$\Cz$        & $3872.7$ & $0.481$ & $0$ \\
+    Thompson (disc.)   & $4095.3$ & $0.411$ & $437$ \\
+    TAR-UCB            & $4247.1$ & $0.393$ & $26{,}498$ \\
+    Fixed-$\Co$        & $5235.0$ & $0.065$ & $0$ \\
+    D-UCB              & $5319.3$ & $0.307$ & $44{,}255$ \\
+    Fixed-$\Ct$        & $6005.2$ & $0.453$ & $0$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/sixmo_cumreward_regret.png}
+  \caption{Six-month run: cumulative reward (left) and cumulative regret
+  against the Oracle (right) for all policies. RA-TS-F's regret grows at a
+  near-constant, far shallower slope than every alternative throughout the
+  $180$ days---there is no late-horizon degradation, saturation of the
+  advantage, or drift-induced breakdown.}
+  \label{fig:sixmo}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/sixmo_timelines.png}
+  \caption{Six-month run: regime severity (top) and controller choices of the
+  Oracle, RA-TS-F, and LI-TAR-UCB. RA-TS-F's schedule visually mirrors the
+  Oracle's ($\sim$\,$17$k switches vs.\ the Oracle's $865$, the excess being
+  brief acquisition probes); LI-TAR-UCB's $47.5$k switches render its timeline
+  a solid band of thrashing.}
+  \label{fig:sixmotimelines}
+\end{figure}
+
+The six-month run tests whether the one-week picture survives scale, slow
+parameter drift, and hundreds of regime episodes. It does
+(Table~\ref{tab:sixmo}, Figs.~\ref{fig:sixmo}--\ref{fig:sixmotimelines}):
+RA-TS-F's regret of $861.5$ is $2.5\times$ lower than the best alternative
+(LI-TAR-UCB) and $4.3$--$7\times$ lower than everything else, capturing $78\%$
+of the Oracle's advantage over the best fixed controller---quantitatively
+consistent with the one-week ratios, i.e.\ the advantage is not a
+short-horizon artefact. The mean per-window regret is $0.0055 \approx
+0.13\,\hat\sigma$. RA-TS-F also switches $2.8\times$ \emph{less} than
+LI-TAR-UCB while achieving far lower regret: its exploration is
+event-triggered rather than scheduled. Fraction-optimal illustrates why regret,
+not arm-accuracy, is the right metric here: Fixed-$\Cz$ matches RA-TS-F's
+fraction-optimal ($0.48$) simply because $R_0$ dominates the duty cycle, yet
+incurs $4.5\times$ the regret---the windows that matter are the severe ones,
+where the arms separate and Fixed-$\Cz$ is maximally wrong.
+
+Two further observations from the six-month diagnostics. First, the regret
+slope of RA-TS-F is stable across the entire horizon
+(Fig.~\ref{fig:sixmo}, right): the resumed posteriors do not go stale despite
+the environment's slow within-regime drift ($\sim$\,$3600$ drift transitions),
+because the CUSUM alarm simply triggers re-acquisition whenever a stored
+baseline stops matching. Second, the library grows to $J=17$ entries over
+$180$ days. Diagnosing them individually shows the excess is \emph{not}
+primarily duplicate noise: six entries are duplicates of the $R_0$/$R_1$
+clusters (the same $n_{\min}$-probe effect seen at week scale), but eight are
+short-dwell entries that map onto genuine \emph{transition states}---windows in
+which the environment is mid-ramp between regimes ($13.5\%$ of tracked time;
+even the Oracle's reward drops from $0.40$ to $0.19$ there). The algorithm, built
+for discrete recurring regimes, faithfully discovers that this environment's
+switches are continuous ramps and files the ramp as extra regimes. This is a
+bookkeeping artefact with no measurable regret cost, but it delineates cleanly
+where the discrete-regime model of the environment ends.
 
 % =====================================================================
 \section{Discussion}\label{sec:discussion}
@@ -568,16 +963,62 @@ chosen rather than by the act of switching. These two observations frame the
 bandit comparison of Section~\ref{sec:bandit}: the relevant question is how
 quickly and reliably a policy identifies the regime-optimal controller as the
 environment drifts, with switching essentially free.
-\todo{expand once bandit results are in; comment on algorithm choice and on the
-path to learned (NN) controllers, for which the reward separation is expected to
-be larger and the switching cost must be re-assessed.}
+
+The bandit results answer that question with a clear structural message. The
+methods that performed best are exactly those that exploit \emph{recurrence}:
+resuming per-regime knowledge beats re-learning it, and beats forgetting it
+(discounted baselines) by a wide margin. Moreover, the progression from
+TAR-UCB through LI-TAR-UCB and the identify-and-commit family to RA-TS-F is a
+progression of \emph{removing} machinery: scheduled probes, certification
+tests, and explicit level estimates each addressed a real failure but carried
+a standing cost, and each became unnecessary once identification was made
+emergent from Thompson sampling itself, guarded only by a bounded coverage
+floor. The floor is the one non-negotiable ingredient---without it, Thompson
+sampling's own efficiency starves the identification signal and the policy
+stalls---and its cost is bounded ($n_{\min}K$ windows per
+re-acquisition, $9.4\%$ of decisions in practice). A practical corollary for
+detector operations: the reward signal that suffices for all of this is
+computable online from existing error and control channels; no auxiliary
+environmental sensing is required, although incorporating such context (e.g.\
+seismometer bands or earthquake early warning) as side information is a
+natural extension.
+
+For future learned (e.g.\ neural-network) controllers two elements must be
+revisited: the reward separation between arms is expected to grow (learned
+controllers specialise more aggressively than a gain family), which makes the
+selection problem easier; but the near-free switching result of
+Section~\ref{sec:switch} relies on the gain-family structure and must be
+re-measured, since a convex blend of two stabilising controllers of different
+shape is not guaranteed stabilising mid-ramp. The RA-TS-F layer itself is
+agnostic to both changes.
 
 % =====================================================================
 \section{Conclusion}\label{sec:conclusion}
 % ---------------------------------------------------------------------
-\todo{Summarise contributions and the bandit outcome; restate the headline that
-switching is nearly free under a proper handover, and the implications for
-autonomous alignment control.}
+We posed the operational practice of switching angular-control filters as an
+online controller-selection problem and built the infrastructure to study it
+rigorously: a validated time-domain plant, three physically motivated operating
+regimes with a designed one-to-one regime--controller mapping, a calibrated
+multi-band reward computed online from the loop's own signals, and a
+common-random-numbers benchmark spanning one-week and six-month horizons. Three
+findings stand out. First, the selection problem is well posed but genuinely
+hard: the reward distributions of the candidate controllers overlap strongly,
+two of the three regimes are separated by gaps below the per-window noise, and
+the regime identity is carried by the cross-arm reward \emph{shape} rather than
+its level. Second, the apparent cost of switching controllers is dominated by
+the handover implementation; with a bumpless, parallel-bank handover---standard
+practice in detector digital control---switching is nearly free, removing the
+main physical objection to autonomous switching. Third, a deliberately minimal
+policy, Recurrence-Aware Thompson Sampling with a bounded coverage floor
+(RA-TS-F), outperforms every alternative tested---discounted bandits, an
+operator-like rule, change-detection designs with substantially more
+machinery, and all fixed controllers---achieving $74$--$83\%$ of the oracle's
+achievable advantage over the best fixed controller, with a regret slope that
+remains constant over $180$ simulated days. The combination of a cheap
+handover, an online reward from existing channels, and a simple
+recurrence-aware policy makes autonomous alignment-configuration selection a
+realistic operational prospect; extending the same framework to learned
+controllers on hardware-validated setups is the natural next step.
 
 % =====================================================================
 \section*{Acknowledgements}
@@ -610,6 +1051,8 @@ autonomous alignment control.}
 \bibitem{RussoTutorial} D.~Russo \emph{et al.},
   \emph{A tutorial on Thompson sampling},
   Found.\ Trends Mach.\ Learn.\ \textbf{11}, 1 (2018).
+\bibitem{Page} E.~S.~Page,
+  \emph{Continuous inspection schemes}, Biometrika \textbf{41}, 100 (1954).
 \bibitem{Harms_internal} \todo{replace with a citable reference (or remove)
   for the adiabatic-non-stationarity argument.}
 \end{thebibliography}

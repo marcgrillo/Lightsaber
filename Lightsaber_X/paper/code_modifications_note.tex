@@ -1,0 +1,554 @@
+% ------------------------------------------------------------------------
+% Technical note (NOT a paper): what Lightsaber_X changes with respect to
+% the reference simulator (old_ref), and how.
+%
+% Scope: (1) the non-stationary noise environment, (2) reward generation,
+% (3) online controller switching. Deliberately EXCLUDED: any description
+% of the decision (bandit) algorithms -- here the "policy" is only an
+% abstract box that picks the active controller index once per window.
+%
+% Build: pdflatex code_modifications_note.tex   (no bibliography needed)
+% ------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black]{hyperref}
+\usepackage{xcolor}
+
+% Lightweight unit macros (same convention as main.tex; avoids the siunitx dependency).
+\newcommand{\SI}[2]{#1\,\text{#2}}
+\newcommand{\si}[1]{\text{#1}}
+\newcommand{\num}[1]{#1}
+
+\newcommand{\code}[1]{\texttt{#1}}
+% let TeX stretch interword space rather than overflow into the margin when a
+% long \code{...} identifier cannot be hyphenated
+\emergencystretch=2.5em
+\newcommand{\fs}{f_{\mathrm{s}}}
+\newcommand{\Thold}{T_{\mathrm{hold}}}
+
+\title{\textbf{Lightsaber\_X: simulation-layer modifications\\ with respect to the reference simulator}\\[4pt]
+\large Technical note --- environment, reward, and controller handover}
+\author{M.~Grillo}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note documents, at implementation level, how the \code{Lightsaber\_X} code base
+differs from the trusted reference simulator (\code{old\_ref}) in the three areas that
+constitute the online controller-selection study: (i)~the construction of a
+\emph{non-stationary} noise environment out of three calibrated stationary regimes;
+(ii)~the definition and streaming computation of a scalar \emph{reward} that scores
+closed-loop performance on consecutive time windows; and (iii)~the \emph{bumpless
+handover} machinery that lets the active angular controller be exchanged at run time
+without corrupting the loop state. The decision layer that chooses which controller to
+play (the bandit) is deliberately \emph{not} described here; throughout, it is treated as
+a black box that returns an arm index $a_t \in \{0,1,2\}$ once per decision window.
+All physics of the underlying plant is unchanged with respect to the reference; the
+equivalence is established in \code{VALIDATION\_vs\_old\_ref.md} and summarised in
+Section~\ref{sec:baseline}.
+\end{abstract}
+
+\tableofcontents
+
+% ==========================================================================
+\section{Baseline and scope}
+\label{sec:baseline}
+
+\code{old\_ref} is the original component-graph simulator
+(\code{System}/\code{Mirror}/\code{Beam}/\ldots{} classes) of the Sidles--Sigg
+angular-control problem for a Fabry--Perot arm cavity. \code{Lightsaber\_X} is built on
+its author's Plant-class refactor (\code{Lightsaber.py}: \code{Plant},
+\code{Sensors}, \code{SS\_compensation}, \code{Controller}), which we validated against
+\code{old\_ref} element by element. The core plant physics is \emph{identical}:
+
+\begin{itemize}
+  \item the actuation path (PUM pitch $\to$ test-mass pitch) and the radiation-pressure
+        path (test-mass pitch $\to$ pitch) use the same zero--pole--gain models
+        ($k=93.52955$ and $k=2.567652$ respectively, identical zeros/poles);
+  \item the suspension transfer functions are bit-identical tabulated data;
+  \item the intra-cavity power follows the same Fabry--Perot response
+        $P_{\mathrm{cav}} = P_{\mathrm{in}}\, t_{\mathrm{ITM}} \, \big/\,
+        \lvert 1-\rho_{\mathrm{ITM}} e^{4\pi i\, \delta L/\lambda}\rvert^{2}$,
+        with the cavity length fluctuation $\delta L$ high-passed by an elliptic filter
+        \code{ellip(2,\,1,\,140,\,$2\pi\cdot50$,\,'high')};
+  \item the optical parameters are unchanged: $P=\SI{705}{W}$, $L=\SI{3994.5}{m}$,
+        $R_{\mathrm{ITM}}=\SI{1934}{m}$, $R_{\mathrm{ETM}}=\SI{2245}{m}$,
+        $t_{\mathrm{ITM}}=0.014$, $\lambda=\SI{1064}{nm}$, $\fs=\SI{256}{Hz}$.
+\end{itemize}
+
+Everything documented below sits \emph{on top} of this validated plant: the reference
+simulator runs one stationary noise batch with one fixed controller; \code{Lightsaber\_X}
+runs a continuous, months-long, regime-switching environment in which the hard-mode
+controller may be exchanged at any decision boundary. A Numba just-in-time port of the
+per-sample loop (\code{fast\_engine.py}, Section~\ref{sec:fast}) makes such horizons
+computationally feasible; it reproduces the Plant-class per-sample sequence exactly and
+is validated against it.
+
+Two soft/hard conventions used throughout: the two mirrors' local pitch coordinates
+$(\theta_{\mathrm{ITM}},\theta_{\mathrm{ETM}})$ are mapped to the \emph{soft/hard
+eigenbasis} by
+\begin{equation}
+  \label{eq:eig}
+  M_{\mathrm{loc}\to\mathrm{eig}} \;=\; \frac{1}{1+r^{2}}
+  \begin{pmatrix} 1 & r\\ -r & 1 \end{pmatrix},
+  \qquad
+  r=\tfrac12\Big(g_1-g_2+\sqrt{(g_1-g_2)^{2}+4}\Big),
+  \quad g_i = 1 - L/R_i ,
+\end{equation}
+and the \emph{hard} mode --- the one destabilised by radiation pressure --- is the
+channel that the exchangeable controller acts on and the reward scores. The soft-mode
+controller is common to all variants and is never switched.
+
+% ==========================================================================
+\section{Non-stationary noise environment}
+\label{sec:env}
+
+\subsection{The three stationary regimes}
+\label{sec:regimes}
+
+The reference simulator draws one stationary noise realisation from fixed O3-derived
+spectra. \code{Lightsaber\_X} replaces this with a \emph{family of three} calibrated
+environmental states (``regimes''), each defined by (a)~a seismic input amplitude
+spectral density (ASD) file and (b)~a set of scalar multipliers applied to the default
+plant flags (\code{bandit\_simulation.py}):
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Regime & ASD file & seismic & input power & sensing\\
+\midrule
+$R_0$ (nominal)         & \code{ASD\_R0\_nominal.csv}     & 1.0  & 1.00 & 120.0\\
+$R_1$ (high microseism) & \code{ASD\_R1\_high\_micro.csv} & 6.0  & 0.95 & 12.0\\
+$R_2$ (extreme seismic) & \code{ASD\_R2\_high\_micro2.csv}& 20.0 & 0.90 & 0.25\\
+\bottomrule
+\end{tabular}
+\caption{Regime definitions. The seismic scale multiplies the ITM/ETM ISI injection;
+the sensing scale multiplies the white readout-noise ASDs
+($n_{\mathrm{hard}}=3\times10^{-14}$, $n_{\mathrm{soft}}=1\times10^{-13}$ in eigenbasis
+units$/\sqrt{\mathrm{Hz}}$). $R_2$ pairs \emph{strong} seismic input with a very
+\emph{clean} sensor, $R_0$ the opposite --- so no single fixed controller is best in all
+regimes, which is the premise of the study.}
+\label{tab:regimes}
+\end{table}
+
+The per-regime noise itself is synthesised exactly as the reference plant does it
+(\code{Plant.create\_tst\_noise\_from\_top}): in the frequency domain, complex white
+Gaussian amplitudes are shaped by (root-PSD $\times$ suspension transfer function) and
+transformed back,
+\begin{equation}
+  \label{eq:synth}
+  n^{(j)}(t) \;=\; \fs \cdot \operatorname{irfft}\!\Big[\, \eta(f)\;
+  s_j \sqrt{S_j(f)}\; T_j(f) \,\Big],
+  \qquad
+  \eta(f) = \eta_{\mathrm{re}} + i\,\eta_{\mathrm{im}},\;\;
+  \eta_{\cdot} \sim \mathcal N\!\big(0,\, \tfrac12\sqrt{T_{\mathrm{blk}}}\big),
+\end{equation}
+per noise component $j$ (ITM/ETM seismic through the top-stage TFs, OSEM length/pitch
+through their TFs), where $s_j$ is the regime scale of Table~\ref{tab:regimes} and
+$T_{\mathrm{blk}}$ the synthesis block length. The six shaped components are summed into
+the two injected test-mass streams (ITM, ETM). The laser intensity noise is produced the
+same way from the O3 relative-power PSD and enters as
+$P_{\mathrm{in}}(t) = P\,\big(1 + \fs\!\cdot\!\operatorname{irfft}[\eta\,\sqrt{S_{\mathrm{RIN}}}]\big)$.
+The DC bin is zeroed. This reproduces the reference construction \emph{block by block};
+each block is an independent stationary realisation of the regime PSDs.
+
+\subsection{Regime mixture: the weight process $W(t)$}
+\label{sec:weights}
+
+Non-stationarity is introduced by blending the three regime streams with a
+time-dependent, simplex-valued weight vector
+$W(t) = \big(W_0(t), W_1(t), W_2(t)\big)$, $\sum_i W_i = 1$:
+\begin{equation}
+  \label{eq:blend}
+  n(t) \;=\; \textstyle\sum_{i} W_i(t)\, n_i(t),
+  \qquad
+  P_{\mathrm{in}}(t) \;=\; \textstyle\sum_{i} W_i(t)\, P_{\mathrm{in},i}(t),
+  \qquad
+  s_{\mathrm{sens}}(t) \;=\; \textstyle\sum_{i} W_i(t)\, s_{\mathrm{sens},i},
+\end{equation}
+i.e.\ the injected suspension noise, the input power, \emph{and} the readout-noise scale
+all follow the same mixture. Crucially, the three per-regime realisations $n_i(t)$ are
+generated \emph{coherently}: within each synthesis block the random generator is reset to
+the same seed before shaping each regime, and the draw order (power first, then the six
+test-mass components) is fixed, so the regimes differ \emph{only} through their spectral
+shaping and scales, not through independent randomness. A weight crossing
+$W: (1,0,0)\to(0,0,1)$ therefore morphs the statistics of one underlying realisation
+rather than cross-fading two unrelated noise records (which would transiently
+\emph{reduce} the variance by up to a factor 2 at the midpoint).
+
+The weight process itself (\code{RegimeEnv} in \code{bandit\_experiment.py}) is a
+compressed-timescale model of a day at a detector site, with two independent layers:
+
+\paragraph{(a) Slow diurnal drift ($R_0 \leftrightarrow R_2$).}
+A ``peaky'' diurnal profile
+\begin{equation}
+  v_\ast(t) \;=\; \tfrac12 + \tfrac12\,\operatorname{sign}\!\big(\cos(2\pi t/P_{\mathrm d})\big)\,
+  \big\lvert \cos(2\pi t / P_{\mathrm d}) \big\rvert^{0.33}
+\end{equation}
+(period $P_{\mathrm d}$; the exponent $0.33$ makes the profile dwell near its extremes
+and cross quickly) is \emph{not} followed continuously. Instead, per diurnal cycle a
+Poisson number ($\mu = 20$) of \emph{transition events} is drawn, with start times
+normally scattered ($\sigma = P_{\mathrm d}/8$) around the two steep points of the cycle
+($P_{\mathrm d}/4$ and $3P_{\mathrm d}/4$). At each event the drift value ramps
+\emph{linearly} from its current value to the target $v_\ast(t_{\mathrm e})$ over an
+exponentially distributed ramp time (mean \SI{40}{s}); between events it holds constant.
+The result is a piecewise-linear, stochastically timed day/night oscillation. A hard
+threshold then snaps near-extreme values to the pure regimes ($v > 0.75 \mapsto 1$,
+$v<0.25\mapsto 0$), so the environment spends most of its time in a \emph{pure} $R_0$ or
+$R_2$ state connected by genuine finite-duration ramps --- transitions are continuous,
+not instantaneous.
+
+\paragraph{(b) Microseismic spike events ($R_1$).}
+Independently, $R_1$ ``storms'' arrive as a Poisson process (rate: \code{spike\_rate}
+events per diurnal period; production 6-month run: 1 per day). Each event is a trapezoid
+in the $R_1$ weight: attack, hold, and decay durations drawn exponentially with
+configurable means (defaults \SI{30}{s}/\SI{150}{s}/\SI{30}{s}; production 6-month run
+uses mean hold $=\SI{1500}{s}$).
+
+\paragraph{Composition.} With $v(t)$ the thresholded drift value and $w_1(t)\in[0,1]$
+the spike envelope, the final weights are
+\begin{equation}
+  \label{eq:W}
+  W(t) \;=\; \Big( \, v(t)\,\big(1-w_1(t)\big),\;\; w_1(t),\;\; \big(1-v(t)\big)\big(1-w_1(t)\big) \Big),
+\end{equation}
+i.e.\ a spike overrides the diurnal state and then hands back to it. The process is
+seeded, hence fully reproducible; all its parameters (\code{spike\_rate},
+\code{spike\_attack/hold/decay}, $\mu$, ramp mean, jitter, exponent, threshold) are part
+of the environment configuration.
+
+\subsection{Months-scale realisation: the disk-backed noise cache}
+\label{sec:cache}
+
+At $\fs=\SI{256}{Hz}$ a 6-month horizon is $N \approx 4\times10^{9}$ samples; three
+regime streams in RAM would exceed \SI{100}{GB}. Because the environment is
+\emph{policy-independent} --- every candidate policy must see the identical noise (common
+random numbers) --- the blended streams of Eq.~\eqref{eq:blend} are computed \emph{once}
+and stored (\code{bandit\_noise\_cache.py}): the two blended test-mass streams and the
+blended input power are written as float32 memory-mapped arrays
+(\code{sus\_itm.npy}, \code{sus\_etm.npy}, \code{power.npy}, $\sim$\SI{48}{GB} for six
+months), together with a manifest holding the per-second weight schedule $W(t)$, the
+sensing-scale schedule, the seed, and all environment parameters (which form the cache
+key: changing any parameter forces regeneration). Synthesis proceeds in
+\SI{4096}{s} blocks; per block, per regime, one call to Eq.~\eqref{eq:synth} with the
+block seed \code{seed + 1000\,b}, then the sample-accurate blend with $W$ interpolated
+from the per-second schedule. The only artefact of block-wise synthesis is a short
+filter transient at each block boundary, negligible on a months-long horizon (the
+slowest reward band settles in $\sim\SI{60}{s}$, cf.\ Section~\ref{sec:reward}).
+
+The white \emph{readout} noise is deliberately \emph{not} stored: it is regenerated at
+run time, per decision window, from a fixed seed shared by all policies, as Gaussian
+samples of standard deviation
+\begin{equation}
+  \sigma_{\bullet}(t) \;=\; n_{\bullet}\,\sqrt{\fs/2}\; \cdot\; s_{\mathrm{sens}}(t),
+  \qquad \bullet \in \{\mathrm{hard}, \mathrm{soft}\},
+\end{equation}
+added to the two eigen-mode readouts. Since every policy consumes the same number of
+draws per window in the same order, the sensing-noise realisation is \emph{identical
+across policies} --- the closed-loop trajectories differ only through the controller
+choices.
+
+% ==========================================================================
+\section{Reward generation}
+\label{sec:reward}
+
+The reference simulator has no notion of reward. \code{Lightsaber\_X} scores closed-loop
+performance on consecutive windows of $\Thold$ seconds (production: \SI{100}{s}); the
+score is designed to (i)~reflect both residual motion \emph{and} control effort across
+the band, (ii)~be computable \emph{online} from streaming data without acausal
+processing, and (iii)~be comparable across regimes.
+
+\subsection{Multi-band features}
+
+Two signals are scored, both in the eigenbasis of Eq.~\eqref{eq:eig}: the hard-mode
+error signal $e_{\mathrm h}(t)$ (the test-mass pitch projected on the hard mode --- the
+controller's input before readout noise) and the hard-mode control effort
+$u_{\mathrm h}(t)$ (the eigen-projection of the commanded actuation). Each is split into
+eight frequency bands by fourth-order Butterworth filters (one low-pass, seven
+band-passes):
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+band & edges [Hz]\\
+\midrule
+LP        & $0$ -- $0.3$\\
+BP$_1$    & $0.05$ -- $0.3$\\
+BP$_2$    & $0.3$ -- $1$\\
+BP$_3$    & $1$ -- $3$\\
+BP$_4$    & $3$ -- $10$\\
+BP$_5$    & $10$ -- $30$\\
+BP$_6$    & $30$ -- $80$\\
+BP$_7$    & $80$ -- $100$\\
+\bottomrule
+\end{tabular}
+\end{center}
+giving 16 features per time block: the RMS of each filtered signal over consecutive
+2-second blocks (512 samples),
+$F_i(b) = \operatorname{RMS}\big[x_i^{\mathrm{filt}}\big]_{\text{block } b}$.
+
+\subsection{Streaming (stateful) filtering}
+\label{sec:stream}
+
+A defect of an early implementation was that the band filters were re-initialised for
+every scoring window, so each window began with a spurious filter start-up transient ---
+particularly harmful for the sub-\SI{0.3}{Hz} bands whose settling time is
+$\mathcal O(\SI{60}{s})$, comparable to the window itself. The current implementation
+(\code{reward\_stream.StreamReward}) keeps the internal state $z_i$ of \emph{every} band
+filter \emph{across window boundaries}: one \code{StreamReward} object lives for the
+whole closed-loop run and its \code{score()} method continues each \code{sosfilt} from
+the previous window's final conditions. The reward signal is therefore filtered as one
+continuous stream over the entire (months-long) horizon; window boundaries have no
+effect whatsoever on the filtering. Equivalently, low-frequency reward content is
+attributed to the window in which it occurs, with no per-window warm-up bias.
+
+\subsection{From features to a scalar score}
+
+The raw score of block $b$ is a negatively weighted log-feature sum,
+\begin{equation}
+  \label{eq:raw}
+  Z(b) \;=\; \sum_{i=1}^{16} w_i \,\log\!\big(F_i(b) + \varepsilon\big),
+  \qquad
+  R_{\mathrm{raw}}(b) \;=\; -\,Z(b), \qquad \varepsilon = 10^{-30},
+\end{equation}
+so that \emph{smaller} band-RMS (less residual motion, less control effort) gives a
+\emph{larger} score, and each band contributes through its \emph{logarithm}, i.e.\
+relative (dB-like) changes are weighted rather than absolute power --- a factor-2
+improvement in a quiet band counts as much as a factor-2 improvement in a loud one. The
+weights $w_i \in [0,1]$ are fixed numbers stored in
+\code{bandit\_reward\_weights\_rel2base.npz}; they were characterised offline relative to
+the nominal controller $C_0$ (hence \code{rel2base}) so as to emphasise the bands in
+which the controller variants actually differ (the file tags its reference as
+\code{base\_controller = C0\_nominal}). The same weight file is used by \emph{every}
+script in the repository --- calibration, experiment drivers, figures --- so all reported
+numbers share one reward definition.
+
+The \emph{window} score is the mean of its per-2s-block raw scores; a \SI{100}{s} window
+therefore averages 50 blocks. In the settled regimes the raw score lies in
+$\approx[165, 169]$ (Table of Section 5 characterisation runs), dipping to
+$\approx 150$ during regime transitions and storms.
+
+\subsection{Normalisation to $[0,1]$ and calibration}
+\label{sec:calib}
+
+The decision layer consumes a bounded reward. Two maps are implemented by the
+function \code{apply\_reward} in \code{bandit\_calibrate.py}:
+\begin{align}
+  \text{logistic (default):}\quad
+  \rho &= \Big(1 + e^{-(\bar R_{\mathrm{raw}} - c)/s}\Big)^{-1},
+  \quad c = 167.5,\; s = 2.5;\\[2pt]
+  \text{linear min--max:}\quad
+  \rho &= \operatorname{clip}\!\Big( \tfrac{\bar R_{\mathrm{raw}} - \mathrm{lo}}
+        {\mathrm{hi} - \mathrm{lo}},\, 0,\, 1 \Big).
+\end{align}
+The min--max endpoints are \emph{not} hand-set: \code{bandit\_calibrate.py} runs all nine
+steady (regime, controller) cells through the actual fast engine
+(\SI{1200}{s} each, first \SI{60}{s} discarded), \emph{plus} one fixed-controller pass
+over a short \emph{drifting} environment containing regime transitions and $R_1$ spikes,
+and sets $[\mathrm{lo},\mathrm{hi}]$ to the pooled min/max widened by a $10\%$ margin.
+The drifting pass matters: the steady cells alone bottom out around raw $\approx 163$,
+but real transitions dip to raw $\approx 150$; an endpoint set from steady data only
+would clip $\sim$10\% of windows to exactly $0$, and a clipped-flat reward during a
+recovering transient is indistinguishable from a settled (very bad) regime --- which was
+observed to corrupt change-detection logic downstream. With the widened floor a
+recovering transient remains a strictly increasing ramp.
+
+The same calibration run also produces (i)~the $3\times3$ table of mean normalised
+rewards per (controller, regime) --- used by the Oracle reference policy and for
+plotting, and (ii)~$\hat\sigma$, the median within-cell per-window reward standard
+deviation, which downstream algorithms use as their noise scale. By construction the
+table's per-regime argmax is the designed diagonal ($C_0$ best in $R_0$, $C_1$ in $R_1$,
+$C_2$ in $R_2$).
+
+% ==========================================================================
+\section{Online controller switching}
+\label{sec:switch}
+
+\subsection{The controller variants}
+
+The exchangeable element is the \emph{hard-mode} feedback filter. All three variants
+share the reference controller's skeleton --- the 2019-era LIGO ASC zpk (4 zeros
+$-0.3436\pm4.11j$, $-0.7854\pm9.392j$; 4 poles $-78.77\pm171.25j$, $-0.062832$,
+$-628.32$; $k=5797.86$), an 8th-order boost stage, an integrator zero at
+$-2\pi\cdot0.1$, and two elliptic low-pass sections --- and differ in DC gain, low-pass
+corner placement, and integrator leak:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Variant & DC gain & LP1 corner & LP2 corner & integrator leak $f_{\mathrm{leak}}$\\
+\midrule
+$C_0$ (nominal)      & 30.0  & \SI{8}{Hz}  & \SI{16}{Hz} & \SI{0.03}{Hz}\\
+$C_1$ (high micro)   & 44.2  & \SI{10}{Hz} & \SI{20}{Hz} & \SI{0.01}{Hz}\\
+$C_2$ (high micro 2) & 50.0  & \SI{12}{Hz} & \SI{26}{Hz} & $0$ (ideal integrator)\\
+\bottomrule
+\end{tabular}
+\caption{Hard-mode controller variants (\code{Controller.set\_feedback\_filter\_hard}).
+LP1 = \code{ellip(2,\,1,\,40)}, LP2 = \code{ellip(4,\,1,\,10)} analog prototypes at the
+quoted corners; the leak moves the integrator pole to $-2\pi f_{\mathrm{leak}}$. The
+analog cascade is discretised by the bilinear transform and factored into second-order
+sections (SOS).}
+\label{tab:ctrl}
+\end{table}
+
+Higher gain and higher corners buy low-frequency suppression (good under strong seismic
+input) at the price of more sensing noise re-injected into the loop (bad with a noisy
+sensor) --- with the regime table (Table~\ref{tab:regimes}) this makes each variant the
+best choice in exactly one regime. The soft-mode filter is identical in all variants and
+its state is never touched by a switch.
+
+\subsection{Why switching is delicate}
+
+Each discretised controller is a cascade of $\sim$10 second-order sections holding two
+delay states each. Naively ``switching'' by rebuilding the filter (as the reference code
+structure would suggest: call \code{set\_feedback\_filter\_hard} with a new name) resets
+those states to zero. The consequence is an actuation discontinuity --- the loop, which
+was applying an $\mathcal O(\text{settled})$ command, suddenly applies the response of an
+empty filter --- i.e.\ an actuator kick whose transient contaminates precisely the
+quantity the study measures (the post-switch reward). An early version of this code had
+exactly this defect, and the observed ``cost of switching'' was dominated by the
+artificial state reset rather than by the controller change itself.
+
+Four handover implementations were therefore built and compared explicitly, in the
+script \code{switching\_dynamics\_fast.py} under \code{dev/} (results in the
+switching-transient study):
+\begin{description}
+  \item[cold] the incoming filter starts from zero state (the naive reset);
+  \item[hot]  the outgoing filter's state array is transplanted into the incoming filter
+              (naive carry-over; the state vectors of different filters are not
+              commensurate, so this is also wrong, just differently);
+  \item[parallel] the incoming filter has been running \emph{continuously} in the
+              background on the same input and is simply made active (its state is
+              exactly what it would have been had it always been in charge);
+  \item[ramp] parallel, plus a linear cross-fade of the \emph{applied actuation} from the
+              outgoing to the incoming filter over a ramp window (bumpless transfer).
+\end{description}
+
+\subsection{Production mechanism: parallel banks with a bumpless ramp}
+\label{sec:banks}
+
+In the production engine \emph{all three} controller banks are stepped at \emph{every}
+sample, each maintaining its own SOS state on the common readout
+(\code{fast\_engine.run\_kernel}):
+\begin{equation}
+  y^{(a)}_k = \mathrm{SOS}^{(a)}\!\big(e_{\mathrm h,k};\, z^{(a)}_k\big),
+  \qquad a \in \{0,1,2\},
+\end{equation}
+so every bank is permanently ``warm''. The applied hard-mode actuation is the active
+bank's output; for the first $N_{\mathrm{ramp}}$ samples after a switch
+(production: $N_{\mathrm{ramp}} = 2\,\mathrm{s}\cdot\fs = 512$) it is cross-faded from
+the previously active bank,
+\begin{equation}
+  \label{eq:ramp}
+  u_{\mathrm h,k} \;=\; (1-\alpha_k)\, y^{(a_{\mathrm{prev}})}_k
+                 \;+\; \alpha_k\, y^{(a_{\mathrm{new}})}_k,
+  \qquad \alpha_k = \frac{k+1}{N_{\mathrm{ramp}}},
+\end{equation}
+after which the new bank alone drives the loop. At the switch instant the applied
+command is (almost) exactly the old controller's output, and it slews continuously to
+the new controller's --- no impulse enters the plant. The slow (Plant-class) engine
+implements the same semantics with two filters instead of three
+(\code{Controller.switch\_hard}): the outgoing filter is kept running for the ramp
+duration and cross-faded out, the incoming filter starts cold but its start-up happens
+\emph{inside} the fade, which begins at weight zero.
+
+The measured switching transients under this mechanism are benign: in $R_0$ the
+post-switch reward dip is at most $\approx 0.6$ raw-score units even for the largest
+gain jump ($C_0 \!\to\! C_2$, gain ratio $1.67$), recovering within a few seconds, and
+the integrated loss over \SI{40}{s} is $\lvert \Delta \rvert \lesssim 2$ raw units ---
+versus dips an order of magnitude larger for the cold handover. This is what makes
+frequent online switching a viable strategy at all, and it is measured, not assumed
+(figures \code{fig1\_R0\_transitions\_ramp} and \code{fig6\_handover\_modes} in the
+paper).
+
+\subsection{State continuity across the whole horizon}
+\label{sec:continuity}
+
+Switching correctness is necessary but not sufficient: the \emph{plant} must also evolve
+continuously across decision windows. In the production driver a single persistent state
+carries, across every window boundary and hence across the entire multi-month run:
+\begin{itemize}
+  \item the plant state: previous-sample pitch and applied actuation of both mirrors
+        (the loop's one-sample delays), the high-pass filter state of the cavity-length
+        path, the radiation-pressure and actuation SOS delay lines;
+  \item the Sidles--Sigg compensator state, including the running cavity-power average
+        $\bar P$ (updated as $\bar P \leftarrow \bar P + (P_{\mathrm{cav}}-\bar P)/N_c$
+        with $N_c$ ramping to $10^{3}$) that sets its gain dynamically;
+  \item all three controller-bank states (Section~\ref{sec:banks});
+  \item all 16 reward band-filter states (Section~\ref{sec:stream}).
+\end{itemize}
+A decision window is thus \emph{not} a simulation episode --- it is purely an
+accounting boundary at which the reward is read out and the active-arm index may change.
+The engine consumes the disk cache in RAM-sized chunks aligned to whole decision windows,
+so no window ever straddles a read boundary.
+
+% ==========================================================================
+\section{The fast engine}
+\label{sec:fast}
+
+None of the above would be usable at months scale with the pure-Python per-sample loop
+($\sim 2\times10^{3}$ steps/s). \code{fast\_engine.py} ports the \emph{exact} per-sample
+sequence
+\begin{center}
+  \code{Plant.propagate} $\to$ \code{Sensors.sample\_readout} $\to$
+  \code{SS\_compensation.sample\_compensation} $\to$ \code{Controller.sample\_feedback}
+\end{center}
+--- including both one-sample delays (actuation and Sidles--Sigg compensation are applied
+one sample after they are computed) --- into a single Numba-compiled kernel
+($\sim 2$--$9\times10^{5}$ steps/s, i.e.\ up to $\sim$3500$\times$ real time). Per sample it:
+\begin{enumerate}
+  \item forms the beam-spot offsets from the previous pitch, the cavity length change,
+        high-passes it, and evaluates the Fabry--Perot power response;
+  \item applies the radiation-pressure torque
+        $\tau = \tfrac{2}{c}\big(P_{\mathrm{cav}}\,b + d_{\mathrm{off}}(P_{\mathrm{cav}}-P_{\mathrm{dc}})\big)$
+        through the rad-to-angle SOS, and the (delayed, negated) commanded actuation
+        through the act-to-angle SOS;
+  \item adds the injected suspension noise (from the cache) and subtracts the delayed
+        Sidles--Sigg compensation, yielding the new pitch;
+  \item projects to the eigenbasis and adds the white readout noise
+        (Section~\ref{sec:cache});
+  \item runs the Sidles--Sigg compensator as a \emph{unit-gain} SOS with a dynamic
+        output scale computed from the running power average (exact in steady state);
+  \item steps all three controller banks and applies the active/cross-faded actuation
+        (Section~\ref{sec:banks}).
+\end{enumerate}
+All filter coefficients (SOS arrays) and constants are extracted from the validated
+Plant-class objects at start-up, so the physics is identical \emph{by construction};
+\code{fast\_engine.validate()} reproduces the slow engine's steady-state scores per
+(regime, controller) cell. SOS filtering uses the transposed direct-form~II
+one-sample step, matching \code{scipy.signal.sosfilt} state conventions exactly, so
+states are interchangeable between the two engines.
+
+% ==========================================================================
+\section{Summary of differences vs.\ the reference}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.24\linewidth}p{0.33\linewidth}p{0.35\linewidth}}
+\toprule
+ & \code{old\_ref} & \code{Lightsaber\_X}\\
+\midrule
+Plant physics & component graph & Plant-class refactor; \textbf{validated identical}\\
+Noise & one stationary O3 batch & 3 calibrated regimes, coherently synthesised, blended by a stochastic diurnal + Poisson-spike weight process; months-scale disk cache\\
+Readout noise & spectral file & white, regime-scaled, regenerated per window from a shared seed (common random numbers across policies)\\
+Controller & one fixed zpk & three variants (Table~\ref{tab:ctrl}) as permanently-warm parallel banks; bumpless 2\,s cross-fade handover\\
+Reward & none & 16-band log-RMS score of hard-mode error + control effort, streaming stateful filters, calibrated logistic/min--max map to $[0,1]$\\
+Loop granularity & one batch = one run & continuous horizon; decision windows are accounting boundaries only (full state continuity)\\
+Speed & pure Python & Numba kernel, exact port, $\sim$3500$\times$ real time\\
+\bottomrule
+\end{tabular}
+\caption{One-line summary of the modification set. The decision layer that exploits this
+infrastructure is documented separately.}
+\end{table}
+
+\end{document}

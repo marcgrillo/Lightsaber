@@ -1,0 +1,1390 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm,bm,mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\graphicspath{{figs/}}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\newcommand{\A}{\mathcal A}
+\newcommand{\F}{\mathcal F}
+\newcommand{\Sset}{\mathcal S}
+\newcommand{\Tset}{\mathcal T}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pp}{\mathbb P}
+\newcommand{\R}{\mathbb R}
+\newcommand{\one}{\bm 1}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\pos}[1]{\left[#1\right]_{+}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Level-Invariant Transition-Aware Recurrent UCB}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note describes a level-invariant variant of Transition-Aware Recurrent UCB (TAR-UCB) for non-stationary bandits with recurrent regimes. The original algorithm identifies regimes by their absolute reward vectors, so a drifting reward level fragments one physical regime into many library labels; moreover, its drop-based change detector cannot see a regime change that rearranges the relative quality of the arms at a constant overall level. LI-TAR-UCB stores and matches regimes through a centered, level-invariant \emph{shape} representation, and runs two complementary change detectors: a fast one-sided CUSUM on the played arm for common reward collapses, and scheduled balanced probing blocks feeding a level-invariant shape-change detector whose detectability constant is the shape separation already required for recurrence recognition, so no assumption is added. Two further safeguards address bounded, saturating reward maps: a \emph{blackout guard} excludes balanced batches whose best arm-mean falls below an identifiability floor --- a saturated collapse flattens the observed shape, and would otherwise be certified as a stable regime and committed to the library as a spurious entry --- and a \emph{mirrored CUSUM} detects the reward rise that ends a collapse in which the algorithm has erroneously settled, an event to which the drop detector is structurally blind. Both safeguards preserve the analysis: the rise detector obeys the same delay and false-alarm bounds as the drop detector, and the blackout guard requires a single margin assumption that is checkable at calibration time. The note gives a complete mathematical description, a regret decomposition whose learning term scales with the number of distinct regimes rather than the number of episodes, proof sketches, and a numerical study on a physics-based gravitational-wave detector-control testbed, including the noise-generation procedure, standard non-stationary baselines, and an ablation isolating the effect of the safeguards.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Many sequential decision problems alternate among a small set of \emph{recurring} operating conditions. The application that motivates this note is the automatic selection of a feedback controller for the angular degrees of freedom of a gravitational-wave detector: the disturbance environment cycles between quiet ground motion, elevated ground motion, and occasional micro-seismic bursts, and each condition favours a different controller from a fixed library. The selector observes only a scalar performance score of whichever controller it is currently running --- a bandit feedback structure --- and must discover, without being told when or into what the environment has changed, which controller is best \emph{now}, while exploiting the fact that conditions it has handled before will return.
+
+Transition-Aware Recurrent UCB (TAR-UCB) addresses this setting by combining a change detector with a persistent \emph{library} of learned regimes: after each detected change it re-identifies the active regime and, if the regime has been seen before, resumes playing from its accumulated statistics instead of relearning from scratch. Two structural deficiencies, however, emerge in realistic use. First, the original library identifies regimes by their \emph{absolute} mean-reward vectors, so a slow drift of the overall reward level --- ubiquitous when the reward is a physical performance score --- makes the same physical regime look new at every visit and fragments the library. Second, its only change detector monitors the played arm for reward \emph{drops}; a regime change that preserves the overall level while silently rearranging which arm is best is invisible to it.
+
+This note presents and analyses \emph{Level-Invariant} TAR-UCB (LI-TAR-UCB), which resolves both deficiencies and is additionally hardened against a failure mode of bounded reward maps that, in our experiments, dominates the empirical regret. The main ideas are simple to state. Regimes are stored and recognized through their \emph{centered shape} --- the mean-reward vector minus its own mean --- which is invariant to common level shifts and is exactly the object that determines the optimal arm. Detection becomes two complementary tests: a fast one-sided CUSUM on the played arm catches common collapses, while scheduled balanced probing blocks feed a level-invariant detector that catches any change of the shape itself, including changes at constant level. Finally, two safeguards address reward \emph{saturation}: when a severe transition drives a bounded reward map onto its lower plateau, every arm reads the same value, the observed shape flattens, and the data become uninformative (a ``blackout''); a guard excludes such data from all decisions, and a second, mirrored CUSUM detects the reward \emph{rise} at the end of a blackout, which the drop-only detector cannot see.
+
+The contributions are:
+\begin{enumerate}
+\item a level-invariant regime representation and library (centered shapes, balanced-block estimates, persistent new-regime creation, and confidence-based merging), with recognition guarantees stated in terms of the shape separation $\Delta_{\mathrm{sh}}$ rather than absolute reward distances (Sections~\ref{sec:shape_representation}--\ref{sec:regime_library});
+\item a two-detector change architecture --- drop CUSUM plus scheduled-probing shape detector --- whose detectability condition for direct switches coincides with the shape-separation assumption already needed for recognition, so no new assumption is introduced (Sections~\ref{subsec:stable_mode}--\ref{subsec:shape_detector});
+\item the blackout guard and the two-sided level detector, both strict supersets of the base algorithm, together with the single margin assumption under which they provably restore correct transition exit in saturating environments (Sections~\ref{subsec:blackouts}, \ref{subsec:blackout_guard}, and~\ref{subsec:blackout_proof}--\ref{subsec:rise_detection_proof});
+\item a regret decomposition whose learning term scales with the number of \emph{distinct} regimes rather than the number of episodes (Section~\ref{sec:main_regret});
+\item a numerical study on a physics-based detector-control testbed --- including the reproducible noise-generation pipeline, comparisons against standard non-stationary bandit baselines and an operator-practice rule, and an ablation isolating the effect of the saturation safeguards (Section~\ref{sec:experiments}).
+\end{enumerate}
+
+Section~\ref{sec:problem_formulation} formalizes the environment model, Sections~\ref{sec:shape_representation}--\ref{sec:regime_library} develop the representation, Section~\ref{sec:algorithm} specifies the algorithm, Sections~\ref{sec:regret}--\ref{sec:main_regret} give the analysis, and Sections~\ref{sec:experiments}--\ref{sec:discussion} report the experiments and discuss the design.
+
+\section{Problem formulation}
+\label{sec:problem_formulation}
+
+Let
+\begin{equation}
+\label{eq:arm_set}
+\A=\{1,\ldots,K\}
+\end{equation}
+be a finite set of arms. At round $t=1,\ldots,T$, the learner selects one arm
+\begin{equation}
+\label{eq:selected_arm}
+A_t\in\A
+\end{equation}
+and observes only the reward of the selected arm,
+\begin{equation}
+\label{eq:observed_reward}
+Y_t\in\R .
+\end{equation}
+The learner does not observe the rewards of the unselected arms. The information available before the decision at time $t$ is
+\begin{equation}
+\label{eq:filtration}
+\F_{t-1}
+=
+\sigma(A_1,Y_1,\ldots,A_{t-1},Y_{t-1}).
+\end{equation}
+
+The environment alternates between stable episodes separated by regime changes. Stable episodes are associated with recurrent latent regimes. A regime change may occur in two ways: through a transition period, during which all arms experience a substantial common reward degradation, or as a direct switch from one stable regime to another with no common drop. The learner does not observe the active regime or the change times.
+
+\subsection{Stable regimes with nuisance level drift}
+\label{subsec:stable_regimes}
+
+Let
+\begin{equation}
+\label{eq:latent_regime}
+Z_t\in\{1,\ldots,S\}
+\end{equation}
+denote the latent stable regime at time $t$, whenever the process is in a stable episode. The number of distinct regimes $S$ is not assumed known by the learner.
+
+The essential modeling point is that the absolute reward level may change across visits to the same physical regime. Therefore, the mean reward vector in a stable episode is decomposed into an action-irrelevant common level and an action-relevant shape. Specifically, in stable regime $z$, the reward of arm $k$ is modeled as
+\begin{equation}
+\label{eq:stable_reward_model}
+Y_t
+=
+\ell_t+\theta_k^{(z)}+\varepsilon_t,
+\qquad A_t=k,
+\end{equation}
+where $\ell_t\in\R$ is a common reward level, $\bm\theta^{(z)}=(\theta_1^{(z)},\ldots,\theta_K^{(z)})$ is the regime-specific shape vector, and $\varepsilon_t$ is noise. The shape vector is normalized by
+\begin{equation}
+\label{eq:zero_sum_shape}
+\one^\top \bm\theta^{(z)}=0 .
+\end{equation}
+The common level $\ell_t$ may differ between visits to the same regime. Since $\ell_t$ is common to all arms, it does not affect the optimal arm. The best arm in regime $z$ is
+\begin{equation}
+\label{eq:best_arm}
+k^\star(z)
+\in
+\argmax_{k\in\A}\theta_k^{(z)}.
+\end{equation}
+For simplicity, ties are broken by the smallest index.
+
+The noise is assumed to satisfy a standard concentration condition.
+
+\begin{assumption}[Sub-Gaussian noise]
+\label{ass:subgaussian}
+There exists $\sigma>0$ such that, for every stable time $t$ and every $\lambda\in\R$,
+\begin{equation}
+\label{eq:subgaussian}
+\E\left[
+\exp\{\lambda\varepsilon_t\}
+\mid \F_{t-1}
+\right]
+\leq
+\exp\left(\frac{\lambda^2\sigma^2}{2}\right).
+\end{equation}
+\end{assumption}
+
+\subsection{Regime changes: collapse-mediated transitions and direct switches}
+\label{subsec:transitions}
+
+Regime changes are not assumed instantaneous. Between two stable regimes, the process may pass through a transition period during which rewards are depressed for all arms. If the pre-transition regime is $z$, then the beginning of such a transition satisfies
+\begin{equation}
+\label{eq:drop_condition}
+\E[Y_t\mid A_t=k,\F_{t-1}]
+\leq
+\ell_t+\theta_k^{(z)}-d_{\min}
+\qquad \text{for all } k\in\A,
+\end{equation}
+for at least $\ell_{\mathrm{drop}}$ consecutive observations, where $d_{\min}>0$. When it applies, this is a detectability condition: the common reward drop is large enough, and lasts long enough, for a played-arm detector to notice quickly that the previously active stable regime is no longer valid.
+
+Not every regime change is collapse-mediated. The environment may also switch directly from one stable shape to another while the common level path stays essentially continuous. Such a \emph{direct switch} produces no common drop and is invisible to any detector that monitors only the absolute reward of the played arm: an adaptive level tracker absorbs the change, and the unplayed coordinates of the shape are simply not observed. Direct switches are handled by a second, level-invariant detector based on scheduled balanced probing (Section~\ref{subsec:shape_detector}), whose detectability constant is the shape separation itself.
+
+Transition periods may have variable duration. The algorithm must therefore not interpret a stable collapsed reward vector as a new stable regime. The revised algorithm includes a transition-collapse guard that prevents this failure mode.
+
+\subsection{Saturated collapses: blackouts}
+\label{subsec:blackouts}
+
+The collapse model \eqref{eq:drop_condition} describes an \emph{additive} common degradation: all arms lose roughly the same amount, so the centered shape of the reward vector is approximately preserved during the collapse. This is the property the transition-collapse guard of Section~\ref{subsec:transition_mode} relies on.
+
+In practice the reward is often a \emph{bounded, saturating} function of an underlying performance signal (in our application, a logistic map of a control-quality score). When a transition drives the underlying signal far below its operating range, the reward map saturates: every arm is pinned near the same lower plateau, and the observed reward vector becomes approximately \emph{flat},
+\begin{equation}
+\label{eq:blackout_vector}
+\E[Y_t\mid A_t=k,\F_{t-1}]\approx y_{\mathrm{sat}}
+\qquad\text{for all }k\in\A,
+\end{equation}
+for the duration of the deep part of the collapse. We call such a period a \emph{blackout}: the observations carry no information about the action-relevant shape, because the saturation has destroyed the arm ordering along with the level. A blackout violates the additive-collapse model --- the centered shape of \eqref{eq:blackout_vector} is $\approx\bm 0$, not $\approx\bm\theta^{(z)}$ --- and therefore silently disables any guard built on shape preservation. Moreover, a flat vector is trivially \emph{stable} from batch to batch, so a stability-based transition exit will certify a long blackout as a settled regime. Section~\ref{subsec:blackout_guard} adds an explicit identifiability floor that closes this failure mode, and Section~\ref{sec:assumptions} states the corresponding margin assumption (every genuine stable regime keeps its best arm above the floor), which is checkable at calibration time because the saturation level is a property of the agent's own reward map, not of the environment. Figure~\ref{fig:blackout} in the experimental section shows a measured instance of the failure and of its repair.
+
+\section{Level-invariant regime representation}
+\label{sec:shape_representation}
+
+The original TAR-UCB library identifies regimes through the absolute empirical mean vector. This is inappropriate when the same physical regime can reappear at different absolute levels. The revised algorithm identifies regimes through a centered shape fingerprint.
+
+Define the centering matrix
+\begin{equation}
+\label{eq:centering_matrix}
+P
+=
+I_K-\frac{1}{K}\one\one^\top .
+\end{equation}
+For any vector $\bm v\in\R^K$, define its empirical level and centered shape by
+\begin{equation}
+\label{eq:level_definition}
+\bar v
+=
+\frac{1}{K}\one^\top \bm v,
+\end{equation}
+and
+\begin{equation}
+\label{eq:shape_map}
+\phi(\bm v)
+=
+P\bm v
+=
+\bm v-\bar v\one .
+\end{equation}
+The map $\phi$ removes common shifts across arms.
+
+\begin{lemma}[Level invariance]
+\label{lem:level_invariance}
+For every $\bm v\in\R^K$ and every $c\in\R$,
+\begin{equation}
+\label{eq:level_invariance}
+\phi(\bm v+c\one)=\phi(\bm v).
+\end{equation}
+Moreover,
+\begin{equation}
+\label{eq:argmax_invariance}
+\argmax_{k\in\A} v_k
+=
+\argmax_{k\in\A} (v_k+c).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Since $P\one=0$, one has $P(\bm v+c\one)=P\bm v+cP\one=P\bm v$. The second claim follows because adding the same constant to all coordinates does not change their ordering.
+\end{proof}
+
+The relevant separation between regimes is therefore not separation in absolute reward space, but separation in shape space:
+\begin{equation}
+\label{eq:shape_separation}
+\Delta_{\mathrm{sh}}
+=
+\min_{z\neq z'}
+\norm{\bm\theta^{(z)}-\bm\theta^{(z')}}_{\infty}.
+\end{equation}
+Reliable recurrence recognition requires
+\begin{equation}
+\label{eq:positive_shape_sep}
+\Delta_{\mathrm{sh}}>0.
+\end{equation}
+
+For each regime $z$ and arm $k$, define the action gap
+\begin{equation}
+\label{eq:arm_gap}
+\Delta_k^{(z)}
+=
+\theta_{k^\star(z)}^{(z)}-\theta_k^{(z)}.
+\end{equation}
+The maximum one-step stable regret is
+\begin{equation}
+\label{eq:max_gap}
+\Delta_{\max}
+=
+\max_{z\in\{1,\ldots,S\}}
+\max_{k\in\A}
+\Delta_k^{(z)}.
+\end{equation}
+
+\section{Regime library}
+\label{sec:regime_library}
+
+At time $t$, the learner has discovered $J_t$ regime labels,
+\begin{equation}
+\label{eq:library}
+\mathcal L_t=\{1,\ldots,J_t\}.
+\end{equation}
+A library element is no longer represented only by an absolute mean vector. Instead, it stores a shape estimate.
+
+For each stored regime $j$ and arm $k$, let $N_{j,k}(t)$ and $S_{j,k}(t)$ denote, respectively, the number and sum of de-levelled observations assigned to arm $k$ in regime $j$. The de-levelled observations are obtained from balanced probing blocks in which all arms are sampled over a short window. If $\mathcal B$ is such a block and
+\begin{equation}
+\label{eq:block_vector}
+\widehat{\bm v}_{\mathcal B}
+=
+(\widehat v_{\mathcal B,1},\ldots,\widehat v_{\mathcal B,K})
+\end{equation}
+is the vector of block means, then the corresponding shape observation is
+\begin{equation}
+\label{eq:block_shape}
+\widehat{\bm\theta}_{\mathcal B}
+=
+\phi(\widehat{\bm v}_{\mathcal B}).
+\end{equation}
+The library update for regime $j$ uses the coordinates of $\widehat{\bm\theta}_{\mathcal B}$:
+\begin{equation}
+\label{eq:library_sum_update_shape}
+S_{j,k}\leftarrow S_{j,k}+\widehat\theta_{\mathcal B,k},
+\qquad
+N_{j,k}\leftarrow N_{j,k}+1.
+\end{equation}
+The shape estimate of stored regime $j$ is
+\begin{equation}
+\label{eq:shape_estimate}
+\widehat\theta_{j,k}(t)
+=
+\frac{S_{j,k}(t)}{N_{j,k}(t)},
+\qquad
+\widehat{\bm\theta}^{(j)}(t)
+=
+(\widehat\theta_{j,1}(t),\ldots,\widehat\theta_{j,K}(t)).
+\end{equation}
+The current inferred regime label is denoted by
+\begin{equation}
+\label{eq:current_regime}
+\widehat Z_t\in\mathcal L_t.
+\end{equation}
+
+\begin{remark}[Why balanced blocks are used]
+A single reward observation cannot determine whether a change is due to the arm effect or to the common level. Balanced blocks produce a local reward vector, and centering that vector removes the local level. This prevents slow level drift from fragmenting one physical regime into several library labels.
+\end{remark}
+
+\subsection{Confidence radii}
+\label{subsec:confidence_radii}
+
+Balanced blocks may have different sizes ($m_0$ samples per arm at initialization, $m_{\mathrm{blk}}$ in scheduled probing, $m_{\mathrm{cls}}$ in diagnostics). Let $n_{j,k}(t)$ denote the total number of \emph{samples} (across all blocks) underlying the statistics of arm $k$ in regime $j$; when all blocks have equal size $m_{\mathrm{blk}}$ one has $n_{j,k}(t)=m_{\mathrm{blk}}N_{j,k}(t)$. For $n_{j,k}(t)>0$, define
+\begin{equation}
+\label{eq:shape_confidence_radius}
+B_{j,k}^{\mathrm{sh}}(t)
+=
+C_{\phi}\sigma
+\sqrt{
+\frac{2\log(4KJ_t t^2/\delta)}{n_{j,k}(t)}
+},
+\end{equation}
+where $\delta\in(0,1)$ is a failure probability and $C_{\phi}>0$ is a numerical constant accounting for centering. If $n_{j,k}(t)=0$, the coordinate is uninitialized and the algorithm collects a balanced block before using the stored regime for exploitation.
+
+The optimistic shape index is
+\begin{equation}
+\label{eq:shape_ucb_index}
+U_{j,k}^{\mathrm{sh}}(t)
+=
+\widehat\theta_{j,k}(t)+B_{j,k}^{\mathrm{sh}}(t).
+\end{equation}
+
+\section{The LI-TAR-UCB algorithm}
+\label{sec:algorithm}
+
+The revised algorithm is called \emph{Level-Invariant Transition-Aware Recurrent UCB} (LI-TAR-UCB). After a short initialization phase it operates in three modes,
+\begin{equation}
+\label{eq:modes}
+\textsc{Stable},
+\qquad
+\textsc{Transition},
+\qquad
+\textsc{Diagnostic},
+\end{equation}
+whose roles are, in one sentence each: \textsc{Stable} exploits the currently believed regime with a UCB rule while two change detectors watch for departures; \textsc{Transition} round-robins the arms until the post-change environment has demonstrably settled; and \textsc{Diagnostic} identifies the settled environment against the library, reusing an existing entry when possible and creating a new one only after persistent evidence. Figure~\ref{fig:algo_trace} (Section~\ref{sec:experiments}) shows the resulting behaviour over one week of the experimental testbed.
+
+\subsection{Initialization}
+\label{subsec:initialization}
+
+The algorithm begins with no regime in the library. It samples each arm $m_0$ times, forms the initial block mean vector
+\begin{equation}
+\label{eq:init_vector}
+\widehat{\bm v}^{(0)}
+=
+(\widehat v_1^{(0)},\ldots,\widehat v_K^{(0)}),
+\end{equation}
+and stores the centered vector
+\begin{equation}
+\label{eq:init_shape}
+\widehat{\bm\theta}^{(1)}
+=
+\phi(\widehat{\bm v}^{(0)})
+\end{equation}
+as the first regime. The algorithm sets
+\begin{equation}
+\label{eq:init_state}
+J=1,
+\qquad
+\widehat Z=1,
+\qquad
+G=0,
+\end{equation}
+and enters \textsc{Stable} mode.
+
+The initial absolute level
+\begin{equation}
+\label{eq:init_level}
+\widehat\ell_0=\frac{1}{K}\one^\top\widehat{\bm v}^{(0)}
+\end{equation}
+is retained only for transition detection. It is not used for regime identity.
+
+\subsection{Stable mode}
+\label{subsec:stable_mode}
+
+Suppose the algorithm is in \textsc{Stable} mode and the current inferred regime is $j=\widehat Z_t$. The selected arm is
+\begin{equation}
+\label{eq:stable_shape_ucb_rule}
+A_t
+\in
+\argmax_{k\in\A}
+\left\{
+\widehat\theta_{j,k}(t)+B_{j,k}^{\mathrm{sh}}(t)
+\right\}.
+\end{equation}
+The rule uses the estimated reward shape rather than the absolute reward level. A common upward or downward shift of all arms does not change the selected arm.
+
+For transition detection, the algorithm keeps a short-window estimate of the current nuisance level. Given recent stable observations assigned to regime $j$, define residual level estimates
+\begin{equation}
+\label{eq:level_residuals}
+\widehat\ell_s
+=
+Y_s-\widehat\theta_{j,A_s}(t),
+\end{equation}
+and set
+\begin{equation}
+\label{eq:current_level_estimate}
+\widehat\ell_t
+=
+\operatorname{mean}\{\widehat\ell_s: s\in\mathcal W_t\},
+\end{equation}
+where $\mathcal W_t$ is a recent stable window. The predicted reward for arm $A_t$ under the current stable regime is
+\begin{equation}
+\label{eq:stable_prediction}
+\widehat m_{t,A_t}
+=
+\widehat\ell_t+\widehat\theta_{j,A_t}(t).
+\end{equation}
+A lower prediction is
+\begin{equation}
+\label{eq:lower_prediction}
+\widehat L_{t,A_t}
+=
+\widehat\ell_t+
+\widehat\theta_{j,A_t}(t)-B_{j,A_t}^{\mathrm{sh}}(t).
+\end{equation}
+After observing $Y_t$, define the drop residual
+\begin{equation}
+\label{eq:drop_residual}
+R_t
+=
+\pos{\widehat L_{t,A_t}-Y_t}.
+\end{equation}
+The CUSUM statistic is
+\begin{equation}
+\label{eq:cusum}
+G_t
+=
+\max\{0,G_{t-1}+R_t-\nu\},
+\end{equation}
+where $\nu>0$ is a tolerance parameter. A transition is declared when
+\begin{equation}
+\label{eq:transition_alarm}
+G_t\geq h.
+\end{equation}
+If no transition is declared, the reward is used for level tracking. It is added to the shape library only through balanced blocks, not as an isolated absolute reward. If a transition is declared, the triggering reward is not assigned to any stable regime, $G_t$ is reset, and the algorithm enters \textsc{Transition} mode.
+
+\subsection{Scheduled balanced probing and shape-change detection}
+\label{subsec:shape_detector}
+
+The drop detector of Section~\ref{subsec:stable_mode} monitors only the reward of the played arm. It is therefore blind to a direct switch that leaves the played arm's absolute mean essentially unchanged while rearranging the relative quality of the arms: the level tracker \eqref{eq:current_level_estimate} absorbs slow common drift, and the played arm carries no information about the unobserved coordinates of the shape. To remove this blind spot, \textsc{Stable} mode interleaves scheduled balanced probing blocks with the shape-UCB rule \eqref{eq:stable_shape_ucb_rule}. These are the same balanced blocks that feed the library update \eqref{eq:library_sum_update_shape}; the schedule makes their timing explicit and gives them a second role as a change detector.
+
+Every $L$ rounds, the algorithm suspends the UCB rule and collects one balanced block: each arm is sampled $m_{\mathrm{blk}}$ times in round-robin order. Let $\widehat{\bm v}_{b}$ denote the resulting block-mean vector and
+\begin{equation}
+\label{eq:probe_shape}
+\widehat{\bm\psi}_{b}=\phi(\widehat{\bm v}_{b})
+\end{equation}
+its centered shape. Define the shape deviation of the block from the current regime estimate,
+\begin{equation}
+\label{eq:probe_deviation}
+D_{b}
+=
+\norm{\widehat{\bm\psi}_{b}-\widehat{\bm\theta}^{(j)}(t)}_{\infty},
+\qquad j=\widehat Z_t .
+\end{equation}
+The block plays a double role, controlled by a consecutive-deviation counter $c$:
+\begin{itemize}
+\item if $D_{b}\leq r_{\mathrm{det}}$, the block is consistent with the current regime; its shape is added to the library statistics of regime $j$ through \eqref{eq:library_sum_update_shape}, and the counter is reset, $c\gets 0$;
+\item if $D_{b}> r_{\mathrm{det}}$, the block is evidence of a shape change; it is \emph{not} added to the library, and the counter is incremented, $c\gets c+1$.
+\end{itemize}
+A shape-change alarm is declared when
+\begin{equation}
+\label{eq:shape_alarm}
+c\geq q_{\mathrm{det}}.
+\end{equation}
+On a shape alarm the algorithm stores $j_{\mathrm{pre}}$ and $\widehat\ell_{\mathrm{pre}}$, resets $c$, $G$, and $G^{\mathrm{up}}$, and enters \textsc{Transition} mode, exactly as after a drop or rise alarm. For a direct switch there is no collapse, so the collapse guard of Section~\ref{subsec:transition_mode} is not satisfied and transition mode exits to \textsc{Diagnostic} after $q_{\mathrm{stab}}$ stable batches.
+
+By Lemma~\ref{lem:level_invariance}, a change of the common level alone leaves $\widehat{\bm\psi}_{b}$ unchanged up to the within-block level variation $\rho_{\ell}$. The shape detector therefore never reacts to pure level drift; it reacts exactly to changes of the action-relevant profile. Conversely, by Assumption~\ref{ass:shape_separation} every pair of distinct stable shapes is $\Delta_{\mathrm{sh}}$-separated in sup-norm, so no additional detectability constant is needed for direct switches: the separation of the shapes is itself the detectability condition. Writing $\epsilon_{\mathrm{b}}$ for the combined estimation error of the probing block and of the stored library shape (Lemma~\ref{lem:shape_concentration}), the threshold must satisfy
+\begin{equation}
+\label{eq:r_det_window}
+\epsilon_{\mathrm{b}}
+<
+r_{\mathrm{det}}
+\leq
+\Delta_{\mathrm{sh}}-\epsilon_{\mathrm{b}},
+\end{equation}
+which is feasible whenever $\Delta_{\mathrm{sh}}>2\epsilon_{\mathrm{b}}$; a natural choice is $r_{\mathrm{det}}=r_{\mathrm{sh}}$, so that the detector and the diagnostic matcher use the same resolution in shape space. The probing schedule diverts at most a fraction $Km_{\mathrm{blk}}/(L+Km_{\mathrm{blk}})$ of stable rounds away from the UCB rule; this exploration cost is accounted for explicitly in the regret bound.
+
+\subsection{Transition mode with collapse guard}
+\label{subsec:transition_mode}
+
+In \textsc{Transition} mode, stable-regime estimates are frozen. The algorithm samples arms in round-robin batches. Let $m_{\mathrm{batch}}$ be the number of samples per arm in a transition batch. For batch $b$, define the batch vector
+\begin{equation}
+\label{eq:transition_batch_vector}
+\widehat{\bm v}^{(b)}
+=
+(\widehat v_1^{(b)},\ldots,\widehat v_K^{(b)}),
+\end{equation}
+where $\widehat v_k^{(b)}$ is the average reward obtained from arm $k$ in batch $b$. Define the batch shape
+\begin{equation}
+\label{eq:transition_batch_shape}
+\widehat{\bm\psi}^{(b)}
+=
+\phi(\widehat{\bm v}^{(b)}).
+\end{equation}
+
+The usual stability statistic is
+\begin{equation}
+\label{eq:stability_statistic}
+H_b
+=
+\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}.
+\end{equation}
+Stability alone is not sufficient, because the collapsed reward vector may itself become stable. The algorithm therefore also checks whether the batch is still consistent with a collapsed version of the pre-transition state.
+
+Let $\widehat\ell_{\mathrm{pre}}$ be the level estimate immediately before the transition alarm, and let $j_{\mathrm{pre}}$ be the pre-transition regime label. Define the pre-transition predicted vector
+\begin{equation}
+\label{eq:pre_transition_vector}
+\widehat{\bm m}_{\mathrm{pre}}
+=
+\widehat\ell_{\mathrm{pre}}\one+\widehat{\bm\theta}^{(j_{\mathrm{pre}})}.
+\end{equation}
+The estimated common drop of batch $b$ relative to this vector is
+\begin{equation}
+\label{eq:estimated_common_drop}
+\widehat d^{(b)}
+=
+\frac{1}{K}\one^\top
+\left(
+\widehat{\bm m}_{\mathrm{pre}}-\widehat{\bm v}^{(b)}
+\right).
+\end{equation}
+The batch is considered still collapsed if
+\begin{equation}
+\label{eq:collapse_condition_level}
+\widehat d^{(b)}\geq d_{\mathrm{exit}}
+\end{equation}
+and
+\begin{equation}
+\label{eq:collapse_condition_shape}
+\norm{\widehat{\bm\psi}^{(b)}-
+\widehat{\bm\theta}^{(j_{\mathrm{pre}})}}_{\infty}
+\leq r_{\mathrm{coll}}.
+\end{equation}
+The threshold $d_{\mathrm{exit}}>0$ specifies how much common reward loss is still interpreted as a transition-induced collapse, while $r_{\mathrm{coll}}$ allows for noise and mild non-common distortions.
+
+The transition mode ends only when the reward vector is stable, not collapsed, and identifiable in the sense of the blackout guard below. That is, the algorithm enters \textsc{Diagnostic} mode only if
+\begin{equation}
+\label{eq:transition_exit_condition}
+H_b\leq r_{\mathrm{stab}}
+\end{equation}
+and the conditions \eqref{eq:collapse_condition_level}--\eqref{eq:collapse_condition_shape} are not simultaneously satisfied, and the identifiability condition \eqref{eq:identifiability_condition} holds, for $q_{\mathrm{stab}}$ consecutive batches.
+
+\subsection{Blackout guard and two-sided level detector}
+\label{subsec:blackout_guard}
+
+Section~\ref{subsec:blackouts} identified the failure mode of saturating reward maps: a deep collapse pins every arm to a common floor, so the observed vector is flat, trivially stable, and \emph{not} shape-consistent with the pre-transition regime --- the collapse guard \eqref{eq:collapse_condition_shape} does not fire, transition mode exits, and diagnostic mode commits a spurious flat shape to the library. Once the algorithm has settled inside a blackout, a second problem appears: when the true post-transition regime finally emerges, the reward \emph{rises}, and the one-sided drop statistic \eqref{eq:cusum} is structurally blind to rises. Two safeguards close these gaps.
+
+\paragraph{Blackout guard.}
+Fix an identifiability floor $\epsilon_{\mathrm{floor}}>y_{\mathrm{sat}}$ (chosen below the best-arm mean of every genuine regime; see Assumption~\ref{ass:saturation_floor}). A transition batch $b$ is called a \emph{blackout batch} if even its best arm-mean is below the floor,
+\begin{equation}
+\label{eq:blackout_batch}
+\max_{k\in\A}\widehat v_k^{(b)}
+<
+\epsilon_{\mathrm{floor}}.
+\end{equation}
+The complementary \emph{identifiability condition} required for transition exit is
+\begin{equation}
+\label{eq:identifiability_condition}
+\max_{k\in\A}\widehat v_k^{(b)}
+\geq
+\epsilon_{\mathrm{floor}}.
+\end{equation}
+A blackout batch can neither count toward the $q_{\mathrm{stab}}$ stable batches required to exit transition mode (the stability counter is reset), nor ever reach the library. Likewise, if a diagnostic block satisfies \eqref{eq:blackout_batch} --- for instance because the collapse deepens again mid-diagnosis --- the block and any pending new-regime candidates are discarded and the algorithm returns to \textsc{Transition} mode. The guard makes the algorithm simply \emph{wait out} the blackout while round-robin sampling; since during a blackout all arms are equally degraded, these waiting rounds also cost essentially nothing against the oracle. Crucially, $\epsilon_{\mathrm{floor}}$ does not compromise level invariance: the saturation plateau $y_{\mathrm{sat}}$ is a property of the agent's own reward map, known at design time, not a property of the environment's drifting level.
+
+\paragraph{Two-sided level detector.}
+\textsc{Stable} mode runs, alongside the drop statistic \eqref{eq:cusum}, a mirrored one-sided CUSUM on \emph{upward} residuals. Define the upper prediction
+\begin{equation}
+\label{eq:upper_prediction}
+\widehat U_{t,A_t}
+=
+\widehat\ell_t+
+\widehat\theta_{j,A_t}(t)+B_{j,A_t}^{\mathrm{sh}}(t),
+\end{equation}
+the rise residual
+\begin{equation}
+\label{eq:rise_residual}
+R_t^{\mathrm{up}}
+=
+\pos{Y_t-\widehat U_{t,A_t}},
+\end{equation}
+and the statistic
+\begin{equation}
+\label{eq:cusum_up}
+G_t^{\mathrm{up}}
+=
+\max\{0,G_{t-1}^{\mathrm{up}}+R_t^{\mathrm{up}}-\nu\},
+\end{equation}
+with alarm condition
+\begin{equation}
+\label{eq:rise_alarm}
+G_t^{\mathrm{up}}\geq h_{\mathrm{up}}.
+\end{equation}
+A rise alarm is handled exactly like a drop alarm: the algorithm stores $j_{\mathrm{pre}}$ and $\widehat\ell_{\mathrm{pre}}$, resets both statistics and the probing counter, and enters \textsc{Transition} mode. This is Page's one-sided CUSUM applied to the negated residual, so it satisfies the same drift, delay, and false-alarm properties as the drop side (Lemma~\ref{lem:rise_detection}); running the two sides together at most doubles the false-alarm probability, which is absorbed by an additive $O(\log 2)$ increase of the thresholds. The natural symmetric choice is $h_{\mathrm{up}}=h$.
+
+The two safeguards are complementary. The blackout guard \emph{prevents} settling inside a saturated collapse; the rise detector \emph{recovers} from any residual mis-settling (for example if $\epsilon_{\mathrm{floor}}$ is set too low, or the settled level is depressed for a reason other than saturation), bounding the contaminated period by a CUSUM detection delay instead of by the scheduled-probing period $q_{\mathrm{det}}(L+Km_{\mathrm{blk}})$, which can be orders of magnitude longer. Both are strict additions: with $\epsilon_{\mathrm{floor}}$ disabled and $h_{\mathrm{up}}=\infty$, the algorithm reduces exactly to the version of the preceding subsections.
+
+\subsection{Diagnostic mode: shape-based recurrence recognition}
+\label{subsec:diagnostic_mode}
+
+In \textsc{Diagnostic} mode, the learner estimates the current post-transition shape. It samples each arm $m_{\mathrm{cls}}$ times and forms the diagnostic vector
+\begin{equation}
+\label{eq:diagnostic_vector}
+\widehat{\bm v}
+=
+(\widehat v_1,\ldots,\widehat v_K).
+\end{equation}
+The diagnostic shape is
+\begin{equation}
+\label{eq:diagnostic_shape}
+\widehat{\bm\psi}
+=
+\phi(\widehat{\bm v}).
+\end{equation}
+For every stored regime $j\in\mathcal L_t$, compute the shape distance
+\begin{equation}
+\label{eq:shape_matching_distance}
+D_j^{\mathrm{sh}}
+=
+\norm{\widehat{\bm\psi}-\widehat{\bm\theta}^{(j)}(t)}_{\infty}.
+\end{equation}
+Let
+\begin{equation}
+\label{eq:nearest_shape_regime}
+j^\star
+\in
+\argmin_{j\in\mathcal L_t}D_j^{\mathrm{sh}}.
+\end{equation}
+If
+\begin{equation}
+\label{eq:matched_shape_condition}
+D_{j^\star}^{\mathrm{sh}}\leq r_{\mathrm{sh}},
+\end{equation}
+the current regime is classified as the already known regime $j^\star$, and the algorithm sets
+\begin{equation}
+\label{eq:set_matched_shape_regime}
+\widehat Z_t=j^\star.
+\end{equation}
+The diagnostic block shape is then added to the shape statistics of regime $j^\star$.
+
+If condition \eqref{eq:matched_shape_condition} fails, the algorithm does not immediately create a new regime. Instead, it stores the diagnostic shape in a temporary candidate buffer. A new regime is created only after $q_{\mathrm{new}}$ consecutive diagnostic blocks that are each farther than $r_{\mathrm{sh}}$ from every stored regime (stability and non-collapse were already certified by the transition-exit rule, and each diagnostic block must additionally satisfy the identifiability condition \eqref{eq:identifiability_condition}). Formally, a new regime is created only if
+\begin{equation}
+\label{eq:persistent_new_regime_condition}
+\min_{j\in\mathcal L_t}
+\norm{\widehat{\bm\psi}^{(b)}-
+\widehat{\bm\theta}^{(j)}(t)}_{\infty}
+>
+r_{\mathrm{sh}}
+\end{equation}
+for $q_{\mathrm{new}}$ consecutive diagnostic blocks. The new regime is initialized with the average of the candidate shape observations.
+
+\subsection{Library consolidation}
+\label{subsec:library_consolidation}
+
+After diagnostic updates, the algorithm performs a merge check. Two stored regimes $i$ and $j$ are merged if their shape confidence sets overlap. A simple sufficient rule is
+\begin{equation}
+\label{eq:simple_merge_rule}
+\norm{\widehat{\bm\theta}^{(i)}(t)-
+\widehat{\bm\theta}^{(j)}(t)}_{\infty}
+\leq r_{\mathrm{merge}}.
+\end{equation}
+A confidence-aware rule is
+\begin{equation}
+\label{eq:confidence_merge_rule}
+\max_{k\in\A}
+\pos{
+\abs{\widehat\theta_{i,k}(t)-\widehat\theta_{j,k}(t)}
+-
+B_{i,k}^{\mathrm{sh}}(t)
+-
+B_{j,k}^{\mathrm{sh}}(t)
+}
+=0.
+\end{equation}
+When two regimes are merged, their shape observations and counts are pooled. The current regime label is updated accordingly. The merge step prevents one physical regime from being shattered into several short-lived labels.
+
+\begin{algorithm}[p]
+\caption{Level-Invariant Transition-Aware Recurrent UCB (LI-TAR-UCB)}
+\label{alg:li_tar_ucb}
+\footnotesize
+\begin{algorithmic}[1]
+\Require Number of arms $K$; noise scale $\sigma$; confidence level $\delta$; drop/rise-detector parameters $\nu,h,h_{\mathrm{up}}$; probing parameters $L,m_{\mathrm{blk}},r_{\mathrm{det}},q_{\mathrm{det}}$; transition parameters $m_{\mathrm{batch}},r_{\mathrm{stab}},q_{\mathrm{stab}},d_{\mathrm{exit}},r_{\mathrm{coll}}$; blackout floor $\epsilon_{\mathrm{floor}}$; diagnostic parameters $m_{\mathrm{cls}},r_{\mathrm{sh}},q_{\mathrm{new}}$; merge threshold $r_{\mathrm{merge}}$; initialization size $m_0$.
+\State Sample each arm $m_0$ times and compute $\widehat{\bm v}^{(0)}$.
+\State Store $\phi(\widehat{\bm v}^{(0)})$ as the first regime shape.
+\State Set $J\gets 1$, $\widehat Z\gets 1$, $G\gets 0$, $G^{\mathrm{up}}\gets 0$, $c\gets 0$, and mode $\gets\textsc{Stable}$.
+\For{$t=1,2,\ldots,T$}
+    \If{mode $=\textsc{Stable}$}
+        \State Let $j\gets\widehat Z$.
+        \If{$L$ rounds have elapsed since the last completed probing block}
+            \State Collect a balanced block: sample each arm $m_{\mathrm{blk}}$ times in round-robin order.
+            \State Compute $\widehat{\bm\psi}_b\gets\phi(\widehat{\bm v}_b)$ and $D_b\gets\norm{\widehat{\bm\psi}_b-\widehat{\bm\theta}^{(j)}}_{\infty}$.
+            \If{$D_b\leq r_{\mathrm{det}}$}
+                \State Update regime $j$ with $\widehat{\bm\psi}_b$ via \eqref{eq:library_sum_update_shape}; reset $c\gets 0$.
+            \Else
+                \State Set $c\gets c+1$; do not update the library.
+            \EndIf
+            \If{$c\geq q_{\mathrm{det}}$}
+                \State Store $j_{\mathrm{pre}}\gets j$ and $\widehat\ell_{\mathrm{pre}}\gets\widehat\ell_t$.
+                \State Set mode $\gets\textsc{Transition}$; reset $c\gets0$, $G\gets0$, $G^{\mathrm{up}}\gets0$.
+            \EndIf
+        \Else
+            \State Select $A_t\in\argmax_{k\in\A}\{\widehat\theta_{j,k}+B_{j,k}^{\mathrm{sh}}\}$.
+            \State Observe $Y_t$.
+            \State Estimate current level $\widehat\ell_t$ from recent stable residuals.
+            \State Compute $R_t\gets\pos{\widehat\ell_t+\widehat\theta_{j,A_t}-B_{j,A_t}^{\mathrm{sh}}-Y_t}$ and update $G\gets\max\{0,G+R_t-\nu\}$.
+            \State Compute $R_t^{\mathrm{up}}\gets\pos{Y_t-\widehat\ell_t-\widehat\theta_{j,A_t}-B_{j,A_t}^{\mathrm{sh}}}$ and update $G^{\mathrm{up}}\gets\max\{0,G^{\mathrm{up}}+R_t^{\mathrm{up}}-\nu\}$.
+            \If{$G\geq h$ or $G^{\mathrm{up}}\geq h_{\mathrm{up}}$}
+                \State Store $j_{\mathrm{pre}}\gets j$ and $\widehat\ell_{\mathrm{pre}}\gets\widehat\ell_t$.
+                \State Set mode $\gets\textsc{Transition}$; reset $c\gets0$, $G\gets0$, $G^{\mathrm{up}}\gets0$.
+                \State Do not add the alarm-triggering reward to any regime estimate.
+            \EndIf
+        \EndIf
+    \algstore{litaralg}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[p]
+\caption{LI-TAR-UCB (continued): \textsc{Transition} and \textsc{Diagnostic} modes}
+\label{alg:li_tar_ucb_cont}
+\footnotesize
+\begin{algorithmic}[1]
+    \algrestore{litaralg}
+    \ElsIf{mode $=\textsc{Transition}$}
+        \State Sample arms in round-robin batches.
+        \State After each complete batch $b$, compute $\widehat{\bm v}^{(b)}$ and $\widehat{\bm\psi}^{(b)}=\phi(\widehat{\bm v}^{(b)})$.
+        \If{$\max_k \widehat v_k^{(b)}<\epsilon_{\mathrm{floor}}$}
+            \State Blackout batch: reset the stability counter and continue batching.
+        \Else
+            \State Compute $H_b=\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}$.
+            \State Compute the estimated common drop $\widehat d^{(b)}$ relative to the pre-transition prediction.
+            \If{$H_b\leq r_{\mathrm{stab}}$ and the batch is not collapsed, for $q_{\mathrm{stab}}$ consecutive batches}
+                \State Set mode $\gets\textsc{Diagnostic}$.
+            \EndIf
+        \EndIf
+    \ElsIf{mode $=\textsc{Diagnostic}$}
+        \State Sample each arm $m_{\mathrm{cls}}$ times and compute $\widehat{\bm v}$, $\widehat{\bm\psi}=\phi(\widehat{\bm v})$.
+        \If{$\max_k \widehat v_k<\epsilon_{\mathrm{floor}}$}
+            \State Blackout block: discard it and any pending candidates; set mode $\gets\textsc{Transition}$.
+        \Else
+            \State Compute $D_j^{\mathrm{sh}}=\norm{\widehat{\bm\psi}-\widehat{\bm\theta}^{(j)}}_{\infty}$ for all $j=1,\ldots,J$.
+            \State Let $j^\star\in\argmin_j D_j^{\mathrm{sh}}$.
+            \If{$D_{j^\star}^{\mathrm{sh}}\leq r_{\mathrm{sh}}$}
+                \State Set $\widehat Z\gets j^\star$ and update regime $j^\star$ with the diagnostic shape.
+            \ElsIf{condition \eqref{eq:persistent_new_regime_condition} holds for $q_{\mathrm{new}}$ consecutive diagnostic blocks}
+                \State Create a new regime from the candidate diagnostic shapes.
+                \State Set $J\gets J+1$ and $\widehat Z\gets J$.
+            \Else
+                \State Continue diagnostic probing.
+            \EndIf
+            \State Merge stored regimes satisfying \eqref{eq:simple_merge_rule} or \eqref{eq:confidence_merge_rule}.
+            \State Set mode $\gets\textsc{Stable}$ once a regime has been matched or created; reset $G,G^{\mathrm{up}},c$.
+        \EndIf
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{Regret criterion}
+\label{sec:regret}
+
+The benchmark is an oracle that knows the active stable shape $Z_t$ and always selects an optimal arm for that shape. At a stable time $t$, the instantaneous regret is
+\begin{equation}
+\label{eq:instantaneous_regret}
+r_t
+=
+\theta_{k^\star(Z_t)}^{(Z_t)}-\theta_{A_t}^{(Z_t)}.
+\end{equation}
+The common level $\ell_t$ cancels from the regret. If $\Sset_T$ denotes the set of stable times up to horizon $T$, the stable-regime regret is
+\begin{equation}
+\label{eq:stable_regret}
+R_T^{\mathrm{stable}}
+=
+\sum_{t\in\Sset_T}
+\left(
+\theta_{k^\star(Z_t)}^{(Z_t)}-\theta_{A_t}^{(Z_t)}
+\right).
+\end{equation}
+Transition periods may be reported separately. If $\Tset_T$ is the set of transition times, write
+\begin{equation}
+\label{eq:regret_decomposition}
+R_T
+=
+R_T^{\mathrm{stable}}+R_T^{\mathrm{transition}}.
+\end{equation}
+The second term depends on the chosen application-specific comparator during non-stationary transition intervals.
+
+\begin{remark}
+If the number of regime episodes grows linearly with $T$, cumulative regret against an oracle that instantly observes every regime switch is generally linear. The meaningful guarantee is controlled regret per episode: after a recurrent shape has been learned, later visits should incur detection, diagnostic, and possibly merge costs, but not a full relearning cost.
+\end{remark}
+
+\section{Assumptions for the analysis}
+\label{sec:assumptions}
+
+The following assumptions give a clean high-probability analysis. They are not minimal, but they isolate the quantities that determine the regret.
+
+\begin{assumption}[Finite recurrent shapes]
+\label{ass:finite_shapes}
+There are $S<\infty$ distinct stable shape vectors $\bm\theta^{(1)},\ldots,\bm\theta^{(S)}\in\R^K$, each satisfying $\one^\top\bm\theta^{(z)}=0$. Stable episodes may revisit the same shape multiple times.
+\end{assumption}
+
+\begin{assumption}[Shape separation]
+\label{ass:shape_separation}
+The stable shapes satisfy
+\begin{equation}
+\label{eq:ass_shape_separation}
+\Delta_{\mathrm{sh}}
+=
+\min_{z\neq z'}
+\norm{\bm\theta^{(z)}-\bm\theta^{(z')}}_{\infty}
+>0.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Local level regularity inside probing blocks]
+\label{ass:level_regular}
+During any balanced probing block used for shape estimation, the common level variation is bounded by $\rho_{\ell}\geq0$:
+\begin{equation}
+\label{eq:level_regular}
+\max_{s,s'\in\mathcal B}
+\abs{\ell_s-\ell_{s'}}
+\leq
+\rho_{\ell}.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Detectable regime change]
+\label{ass:detectable_collapse}
+Each regime change is of one of two kinds:
+\begin{enumerate}
+\item a \emph{collapse-mediated transition}, at the beginning of which condition \eqref{eq:drop_condition} holds for at least $\ell_{\mathrm{drop}}$ consecutive observations, with $d_{\min}>0$; or
+\item a \emph{direct switch}, at which the active shape changes from $\bm\theta^{(z)}$ to $\bm\theta^{(z')}$ with $z'\neq z$, while the level path remains regular in the sense of Assumption~\ref{ass:level_regular}.
+\end{enumerate}
+Direct switches require no separate detectability constant: by Assumption~\ref{ass:shape_separation} the two shapes involved are $\Delta_{\mathrm{sh}}$-separated in sup-norm, and $\Delta_{\mathrm{sh}}$ is exactly the quantity resolved by the shape-change detector of Section~\ref{subsec:shape_detector}. A collapse-mediated transition may contain a \emph{saturated} segment (a blackout, Section~\ref{subsec:blackouts}) during which the additive-collapse description fails and the observed vector is approximately flat at the saturation level $y_{\mathrm{sat}}$.
+\end{assumption}
+
+\begin{assumption}[Saturation floor margin]
+\label{ass:saturation_floor}
+There exist constants $y_{\mathrm{sat}}<\epsilon_{\mathrm{floor}}<r_{\min}$ such that:
+\begin{enumerate}
+\item in every stable regime $z$, the best arm's absolute mean reward satisfies $\ell_t+\theta^{(z)}_{k^\star(z)}\geq r_{\min}$;
+\item during a blackout, every arm's mean reward is at most $y_{\mathrm{sat}}$;
+\item the margins $r_{\min}-\epsilon_{\mathrm{floor}}$ and $\epsilon_{\mathrm{floor}}-y_{\mathrm{sat}}$ both exceed the batch estimation error $C\sigma\sqrt{\log(KT/\delta)/m_{\mathrm{batch}}}$;
+\item blackout observations occur only inside transition periods.
+\end{enumerate}
+This assumption is checkable at design time: $y_{\mathrm{sat}}$ is the saturation plateau of the agent's own reward map, and $r_{\min}$ is obtained from the calibrated per-regime reward table. In our application (Section~\ref{sec:experiments}) the calibrated best-arm rewards are $0.61/0.33/0.58$, the saturation level is $\approx 0.02$, and $\epsilon_{\mathrm{floor}}=0.163$ leaves a margin of roughly $4\sigma$ on both sides.
+\end{assumption}
+
+\begin{assumption}[Correct transition exit]
+\label{ass:correct_exit}
+Except on an event of probability at most $\delta$, the transition exit rule \eqref{eq:transition_exit_condition} is satisfied only after the collapsed transition has ended and a stable shape is active.
+\end{assumption}
+
+\begin{remark}[Status of Assumption~\ref{ass:correct_exit}]
+For additive (shape-preserving) collapses, Assumption~\ref{ass:correct_exit} is justified by the collapse guard (Lemma~\ref{lem:no_spurious_new_regimes}). For saturated collapses the collapse guard is inoperative --- saturation destroys the shape it checks --- and the assumption is instead justified by the blackout guard under Assumption~\ref{ass:saturation_floor} (Lemma~\ref{lem:blackout_guard}). Without the blackout guard, Assumption~\ref{ass:correct_exit} simply \emph{fails} in saturating environments; this is not a theoretical corner case, but the dominant failure mode observed empirically in Section~\ref{sec:experiments}.
+\end{remark}
+
+\begin{assumption}[Long enough stable episodes]
+\label{ass:long_episodes}
+Each stable episode is long enough to complete transition detection, transition exit, diagnostic sampling, and subsequent exploitation.
+\end{assumption}
+
+\section{Proof ingredients}
+\label{sec:proof_ingredients}
+
+\subsection{Concentration of centered block estimates}
+\label{subsec:block_concentration}
+
+\begin{lemma}[Shape concentration]
+\label{lem:shape_concentration}
+Suppose a balanced block $\mathcal B$ is collected during a stable episode of shape $z$, with $m$ samples per arm. Under Assumptions~\ref{ass:subgaussian} and~\ref{ass:level_regular}, there exists a numerical constant $C>0$ such that, with probability at least $1-\delta$,
+\begin{equation}
+\label{eq:shape_concentration}
+\norm{\phi(\widehat{\bm v}_{\mathcal B})-\bm\theta^{(z)}}_{\infty}
+\leq
+C\sigma\sqrt{\frac{\log(K/\delta)}{m}}
++
+\rho_{\ell}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+For each arm, the block mean is an average of $m$ sub-Gaussian observations plus a common level term. The noise component concentrates at order $\sigma\sqrt{\log(K/\delta)/m}$ uniformly over arms. Applying $P$ removes any exactly common level. If the level is not perfectly constant inside the block, the remaining bias is bounded by $\rho_{\ell}$ up to a numerical constant. Combining the coordinate-wise concentration bounds with a union bound gives \eqref{eq:shape_concentration}.
+\end{proof}
+
+\subsection{Correct recurrent-regime matching}
+\label{subsec:matching_proof}
+
+\begin{lemma}[Shape-based classification]
+\label{lem:shape_classification}
+Let the current stable shape be $z$. Suppose the diagnostic phase collects $m_{\mathrm{cls}}$ samples per arm and forms $\widehat{\bm\psi}=\phi(\widehat{\bm v})$. If
+\begin{equation}
+\label{eq:m_cls_requirement}
+m_{\mathrm{cls}}
+\geq
+C
+\frac{\sigma^2}{(\Delta_{\mathrm{sh}}-4\rho_{\ell})^2}
+\log\frac{KT}{\delta},
+\end{equation}
+with $\Delta_{\mathrm{sh}}>4\rho_{\ell}$, then, with probability at least $1-\delta$, nearest-neighbor matching in shape space correctly identifies shape $z$ if it is already in the library. If $z$ is not in the library, the rule does not match it to an existing shape whenever the threshold satisfies
+\begin{equation}
+\label{eq:r_sh_choice}
+\frac{\Delta_{\mathrm{sh}}}{4}
+<
+r_{\mathrm{sh}}
+<
+\frac{3\Delta_{\mathrm{sh}}}{4}.
+\end{equation}
+The inequalities should be interpreted with the additional margin required by the level-variation bias.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+By Lemma~\ref{lem:shape_concentration}, the diagnostic shape is within estimation error of $\bm\theta^{(z)}$. The stored shape estimates satisfy the same type of concentration on the uniform confidence event. If $z$ is in the library, the distance to its stored estimate is at most the sum of two estimation errors. The distance to any other stored shape $z'\neq z$ is at least $\Delta_{\mathrm{sh}}$ minus the same errors. The stated sample size makes the estimation errors smaller than the separation margin, and the threshold in \eqref{eq:r_sh_choice} separates the correct-match and no-match cases.
+\end{proof}
+
+\subsection{Persistent new-regime creation}
+\label{subsec:persistence_proof}
+
+\begin{lemma}[Protection against spurious new regimes]
+\label{lem:no_spurious_new_regimes}
+Assume that a transition batch is a collapsed version of a known shape $j$, in the sense that
+\begin{equation}
+\label{eq:collapsed_known_shape}
+\widehat{\bm v}^{(b)}
+=
+\ell_b\one+
+\bm\theta^{(j)}
+-
+d_b\one+
+\bm\xi_b,
+\end{equation}
+where $d_b\geq d_{\mathrm{exit}}$, and $\norm{\phi(\bm\xi_b)}_{\infty}\leq r_{\mathrm{coll}}/2$. Then, on the shape confidence event, the collapse guard prevents the batch from triggering diagnostic exit or new-regime creation.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Centering \eqref{eq:collapsed_known_shape} removes both $\ell_b\one$ and $d_b\one$, so the batch shape remains close to $\bm\theta^{(j)}$. The level condition detects that the batch is still substantially below the pre-transition level, while the shape condition verifies that the collapsed vector has not become a distinct action-relevant shape. Therefore, the transition-exit rule is not satisfied. Since diagnostic mode is not entered, the collapsed batch cannot be stored as a new regime. If diagnostic mode has already been entered due to noise, the persistence requirement $q_{\mathrm{new}}$ makes the probability of $q_{\mathrm{new}}$ consecutive false new-regime decisions exponentially smaller.
+\end{proof}
+
+Note that Lemma~\ref{lem:no_spurious_new_regimes} covers only \emph{shape-preserving} collapses, i.e.\ its premise \eqref{eq:collapsed_known_shape} requires the collapsed batch to remain an additively shifted copy of a known shape. A saturated collapse violates this premise. The next lemma closes that gap.
+
+\subsection{Blackout guard}
+\label{subsec:blackout_proof}
+
+\begin{lemma}[Correctness of the blackout guard]
+\label{lem:blackout_guard}
+Under Assumptions~\ref{ass:subgaussian} and~\ref{ass:saturation_floor}, with probability at least $1-\delta$, uniformly over the horizon:
+\begin{enumerate}
+\item \emph{No false blackouts.} No transition batch or diagnostic block collected while a stable regime is active satisfies the blackout condition \eqref{eq:blackout_batch}: the best arm's batch mean concentrates above $r_{\min}-C\sigma\sqrt{\log(KT/\delta)/m_{\mathrm{batch}}}>\epsilon_{\mathrm{floor}}$.
+\item \emph{No missed blackouts.} Every batch collected while the environment is saturated satisfies \eqref{eq:blackout_batch}: all batch means concentrate below $y_{\mathrm{sat}}+C\sigma\sqrt{\log(KT/\delta)/m_{\mathrm{batch}}}<\epsilon_{\mathrm{floor}}$.
+\end{enumerate}
+Consequently, on this event, transition mode cannot exit during a saturated collapse, no saturated data ever enters the library, and Assumption~\ref{ass:correct_exit} holds for saturated collapses. The additional time spent waiting in transition mode is at most the blackout duration, which by Assumption~\ref{ass:saturation_floor}(iv) is part of the transition interval already accounted for in the regret decomposition.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Both parts are direct applications of sub-Gaussian concentration of the per-arm batch means, a union bound over arms, batches, and the horizon, and the margin condition Assumption~\ref{ass:saturation_floor}(iii), which places $\epsilon_{\mathrm{floor}}$ more than one estimation error away from both $r_{\min}$ and $y_{\mathrm{sat}}$. Given (i), the guard never blocks a legitimate transition exit or diagnostic decision, so the behaviour of the algorithm on stable data is unchanged. Given (ii), every saturated batch resets the stability counter, so the exit rule cannot be satisfied during the blackout, and saturated diagnostic blocks are discarded before touching the library or the candidate buffer.
+\end{proof}
+
+\subsection{Rise detection}
+\label{subsec:rise_detection_proof}
+
+\begin{lemma}[Rise-detection delay and false alarms]
+\label{lem:rise_detection}
+Suppose the algorithm is settled (possibly erroneously) on a regime whose predicted level-adjusted rewards are accurate up to the confidence radii, and suppose the true mean reward of the played arms then exceeds the upper prediction \eqref{eq:upper_prediction} by at least $d_{\mathrm{up}}>2\nu$ for consecutive observations. Then the statistic \eqref{eq:cusum_up} has positive drift at least $d_{\mathrm{up}}/2-\nu$, and with a calibrated threshold $h_{\mathrm{up}}$ the rise is detected within
+\begin{equation}
+\label{eq:rise_detection_delay}
+D_{\mathrm{up}}
+=
+O\left(
+\frac{\sigma^2}{d_{\mathrm{up}}^2}
+\log\frac{T}{\delta}
+\right)
+\end{equation}
+observations, with probability at least $1-\delta$. While no rise occurs, the probability that $G^{\mathrm{up}}$ ever crosses $h_{\mathrm{up}}$ before horizon $T$ is at most $\delta$ for the same threshold calibration as the drop side. Running the drop and rise detectors simultaneously at most doubles the total false-alarm probability.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The statistic $G^{\mathrm{up}}$ is Page's one-sided CUSUM applied to the negated residual sequence, so the argument of Lemma~\ref{lem:detection_delay} applies verbatim with the roles of upper and lower predictions exchanged: before the rise, $R_t^{\mathrm{up}}$ has nonpositive drift after subtracting $\nu$ on the confidence event, and standard sub-Gaussian maximal inequalities keep $G^{\mathrm{up}}$ below a threshold of order $\sigma\sqrt{\log(T/\delta)}$; after the rise, the residual exceeds $d_{\mathrm{up}}$ minus estimation errors, giving linear drift and the stated crossing time. The union of the two detectors' false-alarm events at most doubles the failure probability, absorbed by replacing $\delta$ with $\delta/2$ in each threshold, i.e.\ an additive $O(\log 2)$ term.
+\end{proof}
+
+\begin{remark}[Recovery role of the rise detector]
+\label{rem:recovery}
+The rise detector converts the worst-case cost of an erroneous settle (whatever its cause) from a scheduled-probing delay $q_{\mathrm{det}}(L+Km_{\mathrm{blk}})$ --- the only mechanism that could previously catch a settled-in-blackout state, since the recovery is a \emph{rise} and the drop detector cannot see it --- into a CUSUM delay \eqref{eq:rise_detection_delay}. With the parameters of Section~\ref{sec:experiments} this is a reduction from hours to minutes. In this sense the blackout guard is the prevention and the rise detector is the safety net; the regret bound only needs the guard, while the safety net tightens the constant in front of any residual mis-settling events.
+\end{remark}
+
+\subsection{Library consolidation}
+\label{subsec:merge_proof}
+
+\begin{lemma}[Correctness of confidence-based merging]
+\label{lem:merge_correctness}
+On the uniform shape-confidence event, the confidence merge rule \eqref{eq:confidence_merge_rule} does not merge two genuinely distinct shapes if their separation is larger than twice the relevant confidence radii. Conversely, two labels representing the same true shape are eventually merged once their confidence radii are sufficiently small.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+If labels $i$ and $j$ represent distinct shapes, the triangle inequality gives a lower bound on $\abs{\widehat\theta_{i,k}-\widehat\theta_{j,k}}$ in at least one coordinate, up to the two confidence radii. If the true shapes are separated by more than these radii, the positive part in \eqref{eq:confidence_merge_rule} is nonzero and the labels are not merged. If the two labels represent the same true shape, both estimates concentrate around the same vector. Once the confidence radii dominate the remaining empirical discrepancy, condition \eqref{eq:confidence_merge_rule} holds and the labels are merged.
+\end{proof}
+
+\subsection{Stable-regime learning regret}
+\label{subsec:stable_learning_proof}
+
+\begin{lemma}[Shape-UCB learning cost]
+\label{lem:shape_ucb_regret}
+On the uniform shape-confidence event, if stable episodes are correctly matched to their recurrent shapes, then the regret incurred by selecting suboptimal arms within the stored shapes satisfies
+\begin{equation}
+\label{eq:shape_ucb_regret}
+R_{T,\mathrm{learn}}^{\mathrm{stable}}
+\leq
+C
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_0
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\Delta_k^{(z)},
+\end{equation}
+for numerical constants $C,C_0>0$, up to additional balanced-probing costs explicitly counted in the diagnostic terms.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The proof is the standard UCB argument applied to centered shape estimates. If a suboptimal arm $k$ is selected in shape $z$ while the optimal arm $k^\star(z)$ is available, optimism implies that the upper confidence index of $k$ is at least the true value of the optimal arm. On the confidence event, this can happen only while the confidence radius of $k$ is of order at least $\Delta_k^{(z)}$. Solving the resulting inequality gives $O(\sigma^2\log T/(\Delta_k^{(z)})^2)$ selections of arm $k$, and multiplying by the gap gives \eqref{eq:shape_ucb_regret}.
+\end{proof}
+
+\subsection{Transition detection}
+\label{subsec:detection_proof}
+
+\begin{lemma}[Detection delay]
+\label{lem:detection_delay}
+Suppose the current stable shape is correctly identified and the level tracker is accurate up to error $e_{\ell}$. If a transition produces a common reward drop of at least $d_{\min}$ for $\ell_{\mathrm{drop}}$ observations, and if $e_{\ell}$ and the shape confidence radius are smaller than $d_{\min}/4$, then the detector has positive drift during the transition. With a calibrated threshold $h$, the transition is detected within
+\begin{equation}
+\label{eq:detection_delay}
+D_{\mathrm{det}}
+=
+O\left(
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta}
+\right)
+\end{equation}
+observations with probability at least $1-\delta$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Before the transition, the lower prediction \eqref{eq:lower_prediction} is below the true stable mean by only the confidence and level-tracking errors. During the transition, the conditional mean is lower by at least $d_{\min}$. Hence the residual $R_t$ in \eqref{eq:drop_residual} has positive expectation of order $d_{\min}$. After subtracting the tolerance $\nu$, the CUSUM statistic has positive drift. A concentration bound for sub-Gaussian martingale differences then yields the stated crossing time for an appropriate threshold.
+\end{proof}
+
+\subsection{Shape-change detection}
+\label{subsec:shape_detection_proof}
+
+\begin{lemma}[Shape-change detection: false alarms and delay]
+\label{lem:shape_detection}
+Let $\epsilon_{\mathrm{b}}$ denote the combined sup-norm estimation error of one balanced probing block ($m_{\mathrm{blk}}$ samples per arm) and of the stored shape of the matched regime, so that by Lemma~\ref{lem:shape_concentration}, on the uniform confidence event,
+\begin{equation}
+\label{eq:eps_blk}
+\epsilon_{\mathrm{b}}
+\leq
+C\sigma\sqrt{\frac{\log(KT/\delta)}{m_{\mathrm{blk}}}}
++2\rho_{\ell}.
+\end{equation}
+Suppose $\Delta_{\mathrm{sh}}>2\epsilon_{\mathrm{b}}$ and the threshold satisfies \eqref{eq:r_det_window}. Then, with probability at least $1-\delta$:
+\begin{enumerate}
+\item \emph{No false alarm.} While the matched regime remains active, every probing block satisfies $D_b\leq\epsilon_{\mathrm{b}}\leq r_{\mathrm{det}}$, so the counter $c$ never reaches $q_{\mathrm{det}}$, and, in addition, every probing block is accepted into the library. Pure level drift cannot trigger the detector, since by Lemma~\ref{lem:level_invariance} it affects $D_b$ only through the within-block bias $\rho_{\ell}$ already contained in $\epsilon_{\mathrm{b}}$.
+\item \emph{Bounded delay after a direct switch.} After a direct switch to a shape $z'$ with $\norm{\bm\theta^{(z')}-\bm\theta^{(z)}}_{\infty}\geq\Delta_{\mathrm{sh}}$, every completed probing block satisfies
+$D_b\geq\Delta_{\mathrm{sh}}-\epsilon_{\mathrm{b}}\geq r_{\mathrm{det}}$,
+hence the alarm fires at the $q_{\mathrm{det}}$-th post-change block, within
+\begin{equation}
+\label{eq:shape_detection_delay}
+D_{\mathrm{sh}}
+\leq
+q_{\mathrm{det}}\left(L+Km_{\mathrm{blk}}\right)
+\end{equation}
+rounds of the change.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Part (i): on the uniform shape-confidence event, the probing shape and the stored shape both concentrate around the active $\bm\theta^{(z)}$, so their distance is at most $\epsilon_{\mathrm{b}}$, which is below $r_{\mathrm{det}}$ by the lower inequality in \eqref{eq:r_det_window}. The persistence requirement $q_{\mathrm{det}}$ further suppresses false alarms caused by any unmodeled outliers, since $q_{\mathrm{det}}$ consecutive exceedances are required. Part (ii): after the switch, the probing shape concentrates around $\bm\theta^{(z')}$ while the library entry still estimates $\bm\theta^{(z)}$; the triangle inequality gives $D_b\geq\Delta_{\mathrm{sh}}-\epsilon_{\mathrm{b}}$, which is at least $r_{\mathrm{det}}$ by the upper inequality in \eqref{eq:r_det_window}. Deviating blocks are excluded from the library, so the stored shape is not contaminated while evidence accumulates. Each post-change block is preceded by at most $L$ exploitation rounds and takes $Km_{\mathrm{blk}}$ rounds, giving \eqref{eq:shape_detection_delay}.
+\end{proof}
+
+\section{Main regret statement}
+\label{sec:main_regret}
+
+Let $G_T$ be the number of stable-regime episodes up to horizon $T$. Let $D_{\mathrm{det}}$ be a high-probability detection-delay bound valid for both kinds of regime change: by Lemma~\ref{lem:detection_delay}, a collapse-mediated transition is detected within $O\!\left(\sigma^2 d_{\min}^{-2}\log(T/\delta)\right)$ rounds by the drop CUSUM, and by Lemma~\ref{lem:shape_detection}, a direct switch is detected within $q_{\mathrm{det}}(L+Km_{\mathrm{blk}})$ rounds by the probing detector, so one may take
+\begin{equation}
+\label{eq:combined_detection_delay}
+D_{\mathrm{det}}
+=
+\max\left\{
+O\!\left(\frac{\sigma^2}{d_{\min}^2}\log\frac{T}{\delta}\right),
+\;
+q_{\mathrm{det}}\left(L+Km_{\mathrm{blk}}\right)
+\right\}.
+\end{equation}
+Let $D_{\mathrm{stab}}$ be a high-probability upper bound on the number of transition-mode observations needed before the stable, non-collapsed, and identifiable exit condition is satisfied; by Lemma~\ref{lem:blackout_guard}, $D_{\mathrm{stab}}$ includes the duration of any blackout segment, which Assumption~\ref{ass:saturation_floor}(iv) places inside the transition interval. Let $D_{\mathrm{new}}$ denote the additional diagnostic cost caused by the persistent new-regime requirement when the post-transition shape has not been seen before.
+
+\begin{theorem}[Regret decomposition for LI-TAR-UCB]
+\label{thm:main_regret}
+Under Assumptions~\ref{ass:subgaussian}--\ref{ass:long_episodes}, choose the shape confidence radii as in \eqref{eq:shape_confidence_radius}, choose $m_{\mathrm{cls}}$ satisfying \eqref{eq:m_cls_requirement}, choose $r_{\mathrm{det}}$ satisfying \eqref{eq:r_det_window}, and choose the detector and merge thresholds so that Lemmas~\ref{lem:no_spurious_new_regimes}--\ref{lem:shape_detection} hold. Then, with probability at least $1-c\delta$ for a numerical constant $c>0$,
+\begin{align}
+\label{eq:main_regret_bound}
+R_T^{\mathrm{stable}}
+&\leq
+C_1
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_2\Delta_{\max}G_TD_{\mathrm{det}}
+\nonumber\\
+&\quad+
+C_3\Delta_{\max}G_TD_{\mathrm{stab}}
++
+C_4\Delta_{\max}G_TK m_{\mathrm{cls}}
++
+C_5\Delta_{\max}D_{\mathrm{new}}
++
+C_6\Delta_{\max}\frac{Km_{\mathrm{blk}}}{L+Km_{\mathrm{blk}}}\,T.
+\end{align}
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The regret is decomposed into six terms. First, after a stable shape has been correctly matched, arm choices are governed by shape-UCB. Lemma~\ref{lem:shape_ucb_regret} gives the recurrent-shape learning cost, which scales with the number of distinct shapes $S$, not with the number of episodes $G_T$. Second, after a regime change, the algorithm may continue using the old stable shape until a detector fires. Lemma~\ref{lem:detection_delay} bounds this delay for collapse-mediated transitions and Lemma~\ref{lem:shape_detection} bounds it for direct switches, giving the combined bound \eqref{eq:combined_detection_delay}; each such round costs at most $\Delta_{\max}$. Third, transition mode lasts until the reward vector is both stable and not collapsed; this contributes at most $\Delta_{\max}G_TD_{\mathrm{stab}}$ if those rounds are included in stable regret, or is reported separately as transition cost otherwise. Fourth, diagnostic mode samples each arm $m_{\mathrm{cls}}$ times, giving at most $\Delta_{\max}G_TK m_{\mathrm{cls}}$. Lemma~\ref{lem:shape_classification} ensures that the resulting shape is correctly matched to the library whenever it has been seen before. Fifth, the persistent new-regime rule may require additional diagnostic blocks before a truly new shape is stored; this cost is represented by $D_{\mathrm{new}}$. Sixth, scheduled probing plays every arm, including suboptimal ones, in a fraction at most $Km_{\mathrm{blk}}/(L+Km_{\mathrm{blk}})$ of stable rounds; each probing round costs at most $\Delta_{\max}$. The two saturation safeguards do not add terms: the blackout guard only lengthens $D_{\mathrm{stab}}$ by the blackout duration (already inside the transition interval, and regret-free against the oracle since all arms are equally saturated there), and the rise detector at most doubles the number of alarm events per true regime change (a drop alarm at the collapse and a rise alarm at the recovery), a constant factor inside the $G_T$ terms. A union bound over the confidence, detection (both sides), classification, collapse-guard, blackout-guard, and merge events gives the theorem.
+\end{proof}
+
+\begin{remark}[Effect of level invariance]
+The classification term depends on the shape separation $\Delta_{\mathrm{sh}}$ rather than on the absolute vector separation. This is the central difference from the original TAR-UCB analysis. If the same physical regime reappears at different levels but with the same shape, LI-TAR-UCB can still match it to the same library element. Symmetrically, the detection term for direct switches also depends only on $\Delta_{\mathrm{sh}}$: a regime change is detected even when it leaves the absolute reward of the played arm unchanged.
+\end{remark}
+
+\begin{remark}[Choice of the probing period]
+\label{rem:probing_period}
+The probing period $L$ trades the exploration term $C_6\Delta_{\max}Km_{\mathrm{blk}}T/(L+Km_{\mathrm{blk}})$ against the direct-switch detection term $C_2\Delta_{\max}G_Tq_{\mathrm{det}}L$. Balancing the two gives
+\begin{equation}
+\label{eq:optimal_L}
+L^\star
+\asymp
+\sqrt{\frac{Km_{\mathrm{blk}}\,T}{q_{\mathrm{det}}\,G_T}},
+\qquad
+C_2+C_6 \text{ terms}
+=
+O\!\left(\Delta_{\max}\sqrt{Km_{\mathrm{blk}}\,q_{\mathrm{det}}\,G_T\,T}\right),
+\end{equation}
+which matches the $\sqrt{G_TKT}$ scaling of forced-exploration change-detection bandits, up to the block factor $m_{\mathrm{blk}}$ and logarithmic terms, while retaining the recurrent-library property that the learning term scales with $S$ rather than $G_T$. If a lower bound on the episode length $T_{\mathrm{min}}$ is known, $L$ should additionally satisfy $q_{\mathrm{det}}(L+Km_{\mathrm{blk}})\ll T_{\mathrm{min}}$ so that each episode is detected well within its own duration.
+\end{remark}
+
+\section{Parameter summary}
+\label{sec:parameters}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Meaning \\
+\midrule
+$\sigma$ & sub-Gaussian noise scale \\
+$\delta$ & target failure probability \\
+$m_0$ & initial samples per arm \\
+$m_{\mathrm{blk}}$ & samples per arm in a balanced shape-estimation block \\
+$L$ & rounds between scheduled probing blocks in stable mode \\
+$r_{\mathrm{det}}$ & shape-deviation threshold of the probing detector \\
+$q_{\mathrm{det}}$ & consecutive deviating blocks required for a shape alarm \\
+$\nu$ & tolerance in the drop and rise detectors \\
+$h$ & threshold for declaring a drop transition \\
+$h_{\mathrm{up}}$ & threshold for declaring a rise transition (natural choice $h_{\mathrm{up}}=h$) \\
+$\epsilon_{\mathrm{floor}}$ & identifiability floor of the blackout guard \\
+$m_{\mathrm{batch}}$ & samples per arm in one transition batch \\
+$r_{\mathrm{stab}}$ & stability threshold for consecutive transition batches \\
+$q_{\mathrm{stab}}$ & number of stable and non-collapsed batches required to exit transition mode \\
+$d_{\mathrm{exit}}$ & minimum remaining common drop interpreted as collapse \\
+$r_{\mathrm{coll}}$ & shape tolerance for the collapse guard \\
+$m_{\mathrm{cls}}$ & diagnostic samples per arm \\
+$r_{\mathrm{sh}}$ & shape-space matching threshold \\
+$q_{\mathrm{new}}$ & consecutive non-matching diagnostics needed to create a new regime \\
+$r_{\mathrm{merge}}$ & threshold for merging duplicate regime labels \\
+\bottomrule
+\end{tabular}
+\caption{Main parameters of LI-TAR-UCB.}
+\label{tab:parameters}
+\end{table}
+
+The diagnostic sample size should scale as
+\begin{equation}
+\label{eq:practical_m_cls}
+m_{\mathrm{cls}}
+\asymp
+\frac{\sigma^2}{(\Delta_{\mathrm{sh}}-4\rho_{\ell})^2}
+\log\frac{KT}{\delta}.
+\end{equation}
+The detection delay of a collapse-mediated transition scales as
+\begin{equation}
+\label{eq:practical_d_det}
+D_{\mathrm{det}}
+\asymp
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta},
+\end{equation}
+while the detection delay of a direct switch scales as
+\begin{equation}
+\label{eq:practical_d_sh}
+D_{\mathrm{sh}}
+\asymp
+q_{\mathrm{det}}\left(L+Km_{\mathrm{blk}}\right),
+\qquad
+m_{\mathrm{blk}}
+\gtrsim
+\frac{\sigma^2}{\Delta_{\mathrm{sh}}^2}\log\frac{KT}{\delta},
+\end{equation}
+where the block size condition makes a single probing block resolve the shape separation, and $L$ is chosen as in Remark~\ref{rem:probing_period}. The shape thresholds $r_{\mathrm{sh}}$ and $r_{\mathrm{det}}$ should be larger than the block estimation error but smaller than the separation between distinct shapes; taking $r_{\mathrm{det}}=r_{\mathrm{sh}}$ is a natural default. The merge threshold should be chosen conservatively so that duplicate labels are consolidated without merging genuinely distinct shapes.
+
+\section{Numerical experiments}
+\label{sec:experiments}
+
+We evaluate LI-TAR-UCB on a physics-based testbed: online selection of the angular (pitch) controller of a simulated gravitational-wave detector, the application that motivated the algorithm. All code, the noise-generation pipeline, and the experiment configurations described below are deterministic given the stated seeds.
+
+\subsection{Testbed}
+\label{subsec:testbed}
+
+The plant is a time-domain simulator of the pitch degree of freedom of a coupled-cavity detector (two suspended test masses, radiation-pressure Sidles--Sigg coupling, realistic suspension and sensing noise), running at $f_s=256$\,Hz. The arm set consists of $K=3$ fixed linear controllers $C_0,C_1,C_2$ of increasing gain, designed so that each of three environmental regimes has a designated best controller: $R_0$ (quiet ground motion, best $C_0$), $R_1$ (micro-seismic burst, best $C_1$), and $R_2$ (elevated ground motion, best $C_2$). One bandit round corresponds to one decision window of $T_{\mathrm{hold}}=100$\,s during which the selected controller is held; controller hand-over uses a bumpless parallel-bank ramp of 2\,s, so switching itself is essentially free. A 7-day horizon therefore contains $6047$ rounds.
+
+\subsection{Environment and noise generation}
+\label{subsec:noise_generation}
+
+The latent regime follows a compressed-timescale diurnal schedule with two independent mechanisms, both hidden from all learners:
+\begin{itemize}
+\item \emph{Diurnal $R_0\leftrightarrow R_2$ drift.} A ``peaky'' diurnal severity $v(t)=\tfrac12+\tfrac12\,\mathrm{sign}(\cos\omega t)\,\abs{\cos\omega t}^{0.33}$ with period $86{,}400$\,s is sampled by a Poisson clock of stochastic ramp events (on average $20$ per cycle, concentrated near the quarter-phases, ramp durations exponential with mean $40$\,s), and hard-thresholded ($v>0.75\mapsto1$, $v<0.25\mapsto0$), so that most of each day is spent purely in $R_0$ or $R_2$, connected by adiabatic multi-step ramps rather than clean jumps. The 7-day realization used below contains $132$ ramp segments.
+\item \emph{Poisson $R_1$ bursts.} Micro-seism events arrive as a Poisson process (rate $1$/day, and $2$/day for a second, harder configuration), each with a trapezoidal weight profile: exponential attack (mean $30$\,s), hold (mean $1500$\,s), decay (mean $30$\,s). The two configurations contain $13$ and $19$ events respectively.
+\end{itemize}
+The instantaneous regime weights $\bm W(t)=(W_0,W_1,W_2)$ blend the three regimes' noise environments continuously; the ``true regime'' used for evaluation is $\argmax_i W_i(t)$. Figure~\ref{fig:env} shows one week of the schedule together with the reward available to the oracle: the two reward levels of the diurnal $R_0/R_2$ alternation, the brief $R_1$ bursts, and --- most importantly for this note --- the saturated blackouts at the deep drift transitions.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_env}
+\caption{The environment over one week ($1$ burst/day configuration). Top: regime weights $\bm W(t)$; the diurnal $R_0\leftrightarrow R_2$ drift proceeds through stochastic hard-thresholded ramps, and $R_1$ bursts arrive as brief trapezoidal events. Bottom: per-window reward of the Oracle policy, with the background shaded by the dominant regime. The two stable reward levels ($\approx0.55$ in $R_0$, $\approx0.25$ in $R_2$) are visible, as are the saturated blackouts (reward pinned near $0.02$ for every arm) at the deep drift transitions.}
+\label{fig:env}
+\end{figure}
+
+Each regime is defined by its own measured noise spectra (suspension-point and local-sensor displacement noises for both test masses, and laser-power fluctuations). Per regime, noise streams are synthesized block-wise in the frequency domain exactly as in the reference plant: white complex Gaussian amplitudes multiplied by the root power spectral density and the suspension transfer function, then inverse-FFT, in blocks of $4096$\,s. Within each block the three regimes share the same random seed and draw order, so they are coherent realizations differing only through their spectra; the blended streams $n(t)=\sum_i W_i(t)\,n_i(t)$ (and likewise the input power) are computed \emph{once}, stored as disk-backed single-precision memory maps, and streamed identically to every policy (common random numbers: policies differ only through their arm choices). White readout noise is regenerated deterministically per window, again identically across policies. This design makes months-scale horizons feasible (the streamed closed loop was verified bit-identical to a monolithic run) and guarantees that policy comparisons are paired.
+
+\subsection{Reward}
+\label{subsec:reward_experiments}
+
+The per-window reward is a bounded score of control quality: a multi-band cost combining the hard-eigenmode angular error and the control effort is computed continuously (filter state carried across windows), averaged over the window, and passed through the logistic map $x\mapsto 1/(1+e^{-(x-167.5)/2.5})$. Table~\ref{tab:reward_table} shows the calibrated per-regime mean rewards; the per-window reward noise is $\widehat\sigma=0.041$ and the empirical shape separation is $\widehat\Delta_{\mathrm{sh}}=0.053$. The designed diagonal is respected in every regime, with two caveats that matter for interpreting the results: in $R_2$ the runner-up $C_1$ is only $0.006$ below the optimum $C_2$ (near-degenerate pair), and in $R_1$ all three arms sit within $0.024$. During deep drift transitions the underlying score collapses far below the operating band and the logistic saturates near $0.02$ for every arm: these are exactly the blackouts of Section~\ref{subsec:blackouts}, lasting from minutes up to about $2.5$\,h.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+ & $R_0$ & $R_1$ & $R_2$ \\
+\midrule
+$C_0$ & $\mathbf{0.606}$ & $0.313$ & $0.490$ \\
+$C_1$ & $0.524$ & $\mathbf{0.327}$ & $0.569$ \\
+$C_2$ & $0.488$ & $0.303$ & $\mathbf{0.575}$ \\
+\bottomrule
+\end{tabular}
+\caption{Calibrated per-regime mean logistic rewards (best per regime in bold). Per-window noise $\widehat\sigma=0.041$; shape separation $\widehat\Delta_{\mathrm{sh}}=0.053$; saturation level $y_{\mathrm{sat}}\approx0.02$.}
+\label{tab:reward_table}
+\end{table}
+
+\subsection{Algorithms compared}
+\label{subsec:baselines}
+
+\begin{itemize}
+\item \textbf{Oracle}: plays $\argmax_k \sum_i W_i(t)\,\bar r(k,R_i)$ using the true weights and the calibrated table; the regret reference.
+\item \textbf{Fixed-$C_0$/$C_1$/$C_2$}: each controller held for the whole horizon.
+\item \textbf{Rule-based}: an operator-practice baseline using \emph{only} the observed reward stream (no access to the true regime): an exponentially weighted moving average of the reward (weight $0.15$) below a calibrated alarm level for $3$ consecutive windows, or a routine re-check every $180$ windows, triggers a round-robin probe of $5$ windows per arm, after which the best-measured arm is held (cool-down $300$ windows).
+\item \textbf{D-UCB}: discounted UCB with discount $\gamma=0.999$ and exploration constant $\xi=0.5$.
+\item \textbf{Thompson}: discounted Gaussian Thompson sampling, discount $\gamma=0.999$, observation scale $\widehat\sigma$, optimistic prior mean $1$.
+\item \textbf{TAR-UCB}: the level-sensitive predecessor, whose library stores absolute mean vectors and whose only change detector is the drop CUSUM.
+\item \textbf{LI-TAR-UCB}: Algorithm~\ref{alg:li_tar_ucb} with the configuration of Table~\ref{tab:config}.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\toprule
+Symbol & Value & Symbol & Value \\
+\midrule
+$\delta$ & $0.1$ & $m_{\mathrm{batch}}$ & $1$ \\
+$m_0$ & $6$ & $r_{\mathrm{stab}}$ & $1.0\,\widehat\sigma$ \\
+$\nu$ & $0.4\,\widehat\sigma$ & $q_{\mathrm{stab}}$ & $1$ \\
+$h$ & $5.0\,\widehat\sigma$ & $d_{\mathrm{exit}}$ & $1.5\,\widehat\sigma$ \\
+$h_{\mathrm{up}}$ & $h$ & $r_{\mathrm{coll}}$ & $r_{\mathrm{sh}}$ \\
+$L$ & $90$ & $m_{\mathrm{cls}}$ & $6$ \\
+$m_{\mathrm{blk}}$ & $3$ & $r_{\mathrm{sh}}$ & $0.45\,\widehat\Delta_{\mathrm{sh}}$ clipped to $[0.6,1.2]\,\widehat\sigma$ $(=0.025)$ \\
+$q_{\mathrm{det}}$ & $2$ & $q_{\mathrm{new}}$ & $2$ \\
+$r_{\mathrm{det}}$ & $r_{\mathrm{sh}}$ & $r_{\mathrm{merge}}$ & $0.8\,r_{\mathrm{sh}}$ \\
+$\epsilon_{\mathrm{floor}}$ & $\tfrac12\min_z\max_k\bar r(k,z)$ $(=0.163)$ & level window & $30$ \\
+\bottomrule
+\end{tabular}
+\caption{LI-TAR-UCB configuration used in all experiments. Detection and stability thresholds scale with the calibrated per-window noise $\widehat\sigma$; shape thresholds respect the calibrated separation $\widehat\Delta_{\mathrm{sh}}$; the blackout floor is half the weakest regime's best-arm reward, leaving $\approx4\widehat\sigma$ margins to both the saturation level and the weakest regime (Assumption~\ref{ass:saturation_floor}).}
+\label{tab:config}
+\end{table}
+
+\subsection{Results}
+\label{subsec:results}
+
+Table~\ref{tab:main_results} reports cumulative regret against the Oracle and the number of controller switches over the 7-day horizon, for both burst configurations; Figure~\ref{fig:regret} shows the corresponding regret trajectories. LI-TAR-UCB attains the lowest regret of all implementable policies in both environments, ahead of the rule-based operator baseline and well ahead of its level-sensitive predecessor and of the passively forgetting baselines. Figure~\ref{fig:algo_trace} shows the algorithm's internal state over the week: after the first diurnal cycle the library has stabilized, and later regime changes are handled by brief \textsc{Transition}/\textsc{Diagnostic} excursions that re-identify a stored regime rather than relearning it. Thompson sampling switches very rarely and effectively locks onto one arm; D-UCB switches an order of magnitude more often than necessary while forgetting the recurrent structure it could reuse. Notably, LI-TAR-UCB \emph{improves} when the burst rate doubles ($96.0\to84.0$): more regime recurrences mean more reuse opportunities for the library, which is the intended behaviour of a recurrence-learning algorithm.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{$1$ burst/day} & \multicolumn{2}{c}{$2$ bursts/day} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Policy & regret & switches & regret & switches \\
+\midrule
+Oracle       & $0.0$   & $45$   & $0.0$   & $53$ \\
+\textbf{LI-TAR-UCB} & $\mathbf{96.0}$  & $2085$ & $\mathbf{84.0}$  & $2159$ \\
+Rule-based   & $125.1$ & $68$   & $175.6$ & $64$ \\
+TAR-UCB      & $154.8$ & $1156$ & $132.0$ & $1107$ \\
+Fixed-$C_0$  & $155.9$ & $0$    & $151.2$ & $0$ \\
+D-UCB        & $159.6$ & $1985$ & $154.1$ & $2047$ \\
+Thompson     & $176.8$ & $33$   & $170.6$ & $31$ \\
+Fixed-$C_1$  & $191.0$ & $0$    & $188.7$ & $0$ \\
+Fixed-$C_2$  & $217.2$ & $0$    & $216.1$ & $0$ \\
+\bottomrule
+\end{tabular}
+\caption{Cumulative regret vs.\ the Oracle (in units of per-window reward; Oracle cumulative reward $\approx2154$ and $2139$) and controller switches, over 7 days ($6047$ windows), for the two burst rates. Same noise realization within each column for all policies (common random numbers).}
+\label{tab:main_results}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_regret}
+\caption{Cumulative regret against the Oracle over the week, for both burst rates (fixed controllers $C_1,C_2$ omitted for clarity; see Table~\ref{tab:main_results}). LI-TAR-UCB accumulates regret at a visibly lower and steadier rate; the step-like increments of the other policies coincide with regime changes they detect late or misidentify.}
+\label{fig:regret}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_algo_trace}
+\caption{LI-TAR-UCB over one week ($1$ burst/day). Top: observed per-window reward, background shaded by the true dominant regime. Middle: the operating mode; \textsc{Transition}/\textsc{Diagnostic} excursions are brief and coincide with true regime changes. Bottom: the believed regime label $\widehat Z$; after the first diurnal cycle, recurrent conditions are re-identified as existing library entries rather than relearned. Entries $j=0$ and $j=2$ both map to $R_0$ (the library holds two nearby $R_0$ shapes), $j=1$ covers $R_2$ together with the nearly flat $R_1$, and $j=3$ is a short-lived entry that is later consolidated by the merge rule (final library size $J=3$).}
+\label{fig:algo_trace}
+\end{figure}
+
+\paragraph{Ablation of the saturation safeguards.}
+Table~\ref{tab:ablation} isolates the contribution of the blackout guard and the rise detector by running the identical algorithm with both disabled ($\epsilon_{\mathrm{floor}}$ off, $h_{\mathrm{up}}=\infty$). The instrumented audit records, for every window in which the algorithm believes itself settled, whether its believed library entry corresponds (by majority co-occurrence) to the true regime, and, for every true regime change, whether the algorithm settled while the reward was still saturated. Without the safeguards, the failure mode of Section~\ref{subsec:blackouts} is not rare: the algorithm settles \emph{inside} a blackout after 3 of the large drift transitions in each environment, commits a flat spurious entry to the library, and then spends $14\%$ ($1$/day) to $24\%$ ($2$/day) of its settled time under a wrong regime belief, during which its arm choice is close to uniform and the per-regime rates of optimal play degrade accordingly. With the safeguards, blackout settles are eliminated (the single residual case settles during the ramp of an $R_1$ burst, where the blended reward straddles the floor), the spurious flat entry never forms, contamination drops to $7$--$9\%$ (dominated by benign detection latency at slow drift boundaries), and in \emph{every} regime the algorithm plays an optimal or near-optimal arm ($\leq0.02$ below the optimum, which in $R_2$ means the $0.006$-degenerate pair $\{C_1,C_2\}$) in $88$--$100\%$ of its settled windows.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{$1$ burst/day} & \multicolumn{2}{c}{$2$ bursts/day} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+ & plain & +safeguards & plain & +safeguards \\
+\midrule
+regret vs.\ Oracle          & $115.3$ & $\mathbf{96.0}$ & $142.9$ & $\mathbf{84.0}$ \\
+settled during a blackout    & $3$     & $\mathbf{0}$    & $3$     & $\mathbf{1}$ \\
+spurious flat library entry  & yes     & \textbf{no}     & yes     & \textbf{no} \\
+settled time under wrong belief & $13.8\%$ & $\mathbf{7.5\%}$ & $23.7\%$ & $\mathbf{8.6\%}$ \\
+horizon spent settled below $\epsilon_{\mathrm{floor}}$ & $2.7\%$ & $\mathbf{0.9\%}$ & $7.3\%$ & $\mathbf{1.3\%}$ \\
+near-optimal play in $R_0$   & $0.774$ & $\mathbf{0.981}$ & $0.904$ & $\mathbf{0.981}$ \\
+near-optimal play in $R_1$   & $0.889$ & $\mathbf{1.000}$ & $0.961$ & $\mathbf{0.968}$ \\
+near-optimal play in $R_2$   & $0.866$ & $\mathbf{0.881}$ & $0.416$ & $\mathbf{1.000}$ \\
+\bottomrule
+\end{tabular}
+\caption{Ablation of the blackout guard and rise detector (identical algorithm, seeds, and noise; ``plain'' has $\epsilon_{\mathrm{floor}}$ disabled and $h_{\mathrm{up}}=\infty$). ``Near-optimal play'' is the fraction of settled (non-probing) windows in which the played arm's expected reward is within $0.02$ of the best arm's, per true regime.}
+\label{tab:ablation}
+\end{table}
+
+\paragraph{Case study: one blackout transition.}
+Figure~\ref{fig:blackout} shows the first large drift transition of the 1-burst/day week under both variants, and illustrates both safeguards. At $t=6.3$\,h the $R_0\to R_2$ drift begins and the reward collapses below the floor within two windows; the drop CUSUM fires essentially immediately in both variants. Without the safeguards (top panel), transition mode exits after about $20$ minutes --- the flat collapsed vector is stable from batch to batch, and it does not resemble the $R_0$ shape, so the collapse guard does not recognize it as a collapse --- diagnostic mode then classifies saturated data, a flat entry enters the library, and the algorithm ``settles'' at $t\approx7.4$\,h with the blackout still in progress. When $R_2$ emerges at $t\approx8.7$\,h the reward \emph{rises}; no detector reacts, and the contaminated play continues until scheduled probing accumulates $q_{\mathrm{det}}$ deviating blocks, hours later. With the safeguards (bottom panel), every saturated batch resets the stability counter, so the algorithm round-robins through the entire blackout --- at no cost relative to the oracle, since all arms are equally saturated --- and diagnosis begins only once identifiable post-blackout data are available.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{fig_blackout}
+\caption{Case study of the first large drift transition ($R_0\to R_2$ at $t\approx6.3$\,h), without (top) and with (bottom) the saturation safeguards; background shading indicates the operating mode, and the dotted line is the identifiability floor $\epsilon_{\mathrm{floor}}$. Top: the plain algorithm certifies the flat, saturated vector as a settled regime mid-blackout and cannot see the reward rise when $R_2$ emerges. Bottom: the blackout guard holds \textsc{Transition} through the entire saturated period, and diagnosis runs on identifiable data only.}
+\label{fig:blackout}
+\end{figure}
+
+\paragraph{Residual limitations.}
+Three known imperfections remain, all visible in the audit. First, immediately after the very first blackout of the horizon the young library can misclassify the post-blackout regime for a couple of hours until probing corrects it; this is a cold-start effect that does not recur once the library has matured. Second, $R_1$ flickers shorter than the diagnostic budget (a few minutes of dominance during a burst's ramp) are not tracked; in this testbed their cost is negligible because $C_1$ is optimal in $R_1$ and $0.006$-suboptimal in $R_2$. Third, settle latency after large transitions is $40$--$120$ minutes, set by the transition and diagnostic sample budget $(m_{\mathrm{batch}}q_{\mathrm{stab}}+m_{\mathrm{cls}})\,K\,T_{\mathrm{hold}}$; shrinking that budget further was found to over-fragment the library.
+
+\section{Discussion}
+\label{sec:discussion}
+
+LI-TAR-UCB modifies the original TAR-UCB representation while preserving its autonomous, reward-only structure. The regime library no longer compares absolute reward vectors. It compares centered shape vectors, so a common drift in the reward level does not create artificial new regimes. The algorithm also avoids immediate new-regime creation: a new label is introduced only after the environment has demonstrably settled and several consecutive diagnostic estimates remain far from every stored shape. Finally, a merge step consolidates library labels whose shape confidence sets overlap.
+
+Detection is symmetric to identification. A representation that is invariant to the level must not rely on the level to detect change: an adaptive level tracker absorbs slow common drift, so a played-arm drop detector alone cannot see a regime change that occurs at constant level. LI-TAR-UCB therefore pairs the fast drop CUSUM, which reacts within a few observations to common collapses, with a scheduled probing detector that compares centered block shapes to the current library entry. The probing detector is level-invariant by construction, detects any change of the action-relevant profile at a cost controlled by the probing period, and reuses the same balanced blocks that maintain the library estimates, so no additional data type is introduced. Its detectability condition coincides with the shape-separation assumption already required for recurrence recognition, so the assumption set is not enlarged.
+
+The resulting method is appropriate when the action-relevant information is the relative reward profile across arms, while the absolute level is a nuisance variable. The regret analysis is correspondingly stated in shape space. The stable learning term depends on the arm gaps within each recurrent shape, while the classification term depends on the shape separation $\Delta_{\mathrm{sh}}$. Transition costs remain episode-dependent because frequent hidden transitions cannot be eliminated by a context-free reward-only learner.
+
+Finally, the saturation safeguards address a gap between the collapse model and bounded reward maps that, in our experiments, is the dominant practical failure mode rather than a theoretical corner case. A shape-based representation is only as good as the identifiability of the data feeding it: when the reward map saturates, the observations are flat regardless of the underlying regime, and any shape-matching machinery will faithfully learn that flatness as if it were structure. The blackout guard formalizes the obvious remedy --- refuse to learn from data that cannot identify anything --- at the cost of one margin assumption that the system designer can verify from the reward map and the calibration table before deployment. The two-sided detector restores the symmetry that a level tracker silently breaks: a learner that adapts its level reference must be able to detect departures in both directions, because an erroneous settle at a depressed level turns the interesting event (recovery) into a rise. Both safeguards are strict supersets of the original algorithm and both preserve its guarantees, which the ablation of Section~\ref{subsec:results} confirms empirically: they remove the failure mode without measurably paying for it anywhere else.
+
+\end{document}

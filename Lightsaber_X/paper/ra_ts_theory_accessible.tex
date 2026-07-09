@@ -1,0 +1,467 @@
+\documentclass[11pt]{article}
+
+% -----------------------------------------------------------------------------
+% Packages
+% -----------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black}
+
+% -----------------------------------------------------------------------------
+% Theorem environments
+% -----------------------------------------------------------------------------
+\newtheorem{assumption}{Assumption}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{fact}{Fact}
+\newtheorem{remark}{Remark}
+
+% -----------------------------------------------------------------------------
+% Macros
+% -----------------------------------------------------------------------------
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pbb}{\mathbb P}
+\newcommand{\R}{\mathbb R}
+\newcommand{\Rcal}{\mathcal R}
+\newcommand{\Reg}{\mathrm{Reg}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\eimp}{\varepsilon_{\mathrm{imp}}}
+\newcommand{\etol}{\varepsilon_{\mathrm{tol}}}
+\newcommand{\dsh}{\Delta_{\mathrm{sh}}}
+\newcommand{\taum}{\tau_{\mathrm{match}}}
+\newcommand{\nun}{\nu_0}
+
+\title{Recurrence-Aware Thompson Sampling:\\
+\large the algorithm and its regret guarantee, explained}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note describes and analyzes a decision algorithm for the following situation: a system must repeatedly choose one of $K$ possible controllers, receives a noisy performance score after each choice, and operates in an environment that switches --- at unknown times --- among a small set of recurring operating conditions (``regimes''). The algorithm, Recurrence-Aware Thompson Sampling (RA-TS), combines three simple ingredients: a short \emph{probe} that fingerprints the current regime, a \emph{library} that remembers every regime seen so far, and \emph{Thompson sampling} plus a \emph{change detector} for day-to-day operation. We state and prove a regret bound: the total performance lost relative to an omniscient reference grows only logarithmically with time for each \emph{distinct} regime (rather than for each switch), plus a small fixed cost per switch. The presentation is aimed at readers who are comfortable with probability at the level of Gaussian tail bounds but are not specialists in bandit theory. All statements are correct as stated; the few genuinely technical steps are isolated into one clearly marked Fact, whose complete proof is given in a rigorous companion note.\footnote{The companion (\texttt{ra\_ts\_paper\_skeleton.tex}) proves the same theorem with full measure-theoretic bookkeeping: exact treatment of adaptively selected samples, explicit union bounds, and the verification that data-dependent sample selection does not invalidate the concentration inequalities. Nothing in the present note contradicts it; constants here are the same or looser.}
+\end{abstract}
+
+% =============================================================================
+\section{The problem}
+% =============================================================================
+
+Time is divided into rounds $t=1,\dots,T$. In each round the algorithm picks one of $K$ \emph{arms} (read: controllers) $A_t\in\{1,\dots,K\}$ and observes a reward
+\begin{equation}
+    Y_t=\mu_{z_t,A_t}+\varepsilon_t ,
+    \label{eq:model}
+\end{equation}
+where $z_t$ is the currently active, \emph{hidden} regime, $\mu_{r,k}$ is the mean reward of arm $k$ under regime $r$, and $\varepsilon_t$ is zero-mean noise of typical size $\sigma$ (formally: sub-Gaussian with proxy $\sigma$, i.e.\ its tails decay at least as fast as a Gaussian's; a bounded or Gaussian noise satisfies this).
+
+The regime sequence is piecewise constant: time splits into \emph{episodes}, the regime is fixed within an episode, and consecutive episodes have different regimes. There are only finitely many distinct regimes, collected in a set $\Rcal$, and the same regime returns many times. Neither the regimes, nor their means, nor the switch times are known in advance. Let $G_T$ be the number of episodes up to time $T$.
+
+Within a regime $r$ the best arm is $k^\star(r)=\argmax_k\mu_{r,k}$, and the \emph{gap} of a suboptimal arm is $\Delta_{r,k}=\mu_{r,k^\star(r)}-\mu_{r,k}$. Performance is measured by \emph{regret},
+\begin{equation}
+    \Reg_T=\sum_{t=1}^T\Bigl(\mu_{z_t,k^\star(z_t)}-\mu_{z_t,A_t}\Bigr),
+\end{equation}
+the total mean reward lost relative to an omniscient player who always knows the active regime and plays its best arm. Small regret means: almost as good as if the regimes had been visible.
+
+\paragraph{Level and shape.}
+It is useful to split each regime's mean vector into a common offset and a centered part:
+\begin{equation}
+    \mu_{r,k}=\ell_r+\theta_{r,k},\qquad \textstyle\sum_k\theta_{r,k}=0 .
+\end{equation}
+The \emph{level} $\ell_r$ shifts all arms equally and does not affect which arm is best; the \emph{shape} $\theta_r$ carries all the decision-relevant information. Regimes will be recognized by their shapes, so recognition is automatically insensitive to overall shifts of the reward scale. Two constants describe the geometry of the problem:
+\begin{equation}
+    \dsh=\min_{r\ne r'}\max_k\,|\theta_{r,k}-\theta_{r',k}|
+    \qquad\text{(smallest shape separation between regimes)},
+\end{equation}
+\begin{equation}
+    B=\max_{r,r',k}|\mu_{r,k}-\mu_{r',k}|
+    \qquad\text{(largest possible jump of any single arm's mean)} .
+\end{equation}
+
+% =============================================================================
+\section{The algorithm}
+% =============================================================================
+
+RA-TS keeps a \emph{library}: one entry per regime discovered so far. Entry $g$ stores, per arm, only two numbers --- how many rewards were recorded for that arm under this regime, $N_{g,k}$, and their sum, $S_{g,k}$. From these it derives the running averages $\widehat\mu_{g,k}=S_{g,k}/N_{g,k}$ and the entry's shape $\widehat\theta_{g,k}=\widehat\mu_{g,k}-\frac1K\sum_j\widehat\mu_{g,j}$.
+
+The algorithm alternates between two modes.
+
+\paragraph{Acquire (identify the regime).}
+Play each arm in turn --- always the currently least-sampled one --- until every arm has $n_0$ fresh samples; this takes exactly $n_0K$ rounds and is called the \emph{probe}. Compute the probe's shape $\widehat\xi$ (average per arm, then subtract the across-arm mean). Compare it to every library shape using the largest per-arm difference, $D_g=\max_k|\widehat\xi_k-\widehat\theta_{g,k}|$. If the closest entry is within a tolerance $\taum$, decide that this is that regime again: add the probe samples to that entry (a \emph{warm start}) and switch to Track. Otherwise the shape is new: create a new entry from the probe and switch to Track.
+
+\paragraph{Track (exploit and watch).}
+Let $g$ be the identified entry. Each round, draw for every arm a random plausible value of its mean,
+\begin{equation}
+    \widetilde\mu_k\sim\mathcal N\!\bigl(m_{g,k},\,v_{g,k}\bigr),
+    \qquad
+    v_{g,k}=\Bigl(\tfrac1{\tau_0^2}+\tfrac{N_{g,k}}{\sigma^2}\Bigr)^{-1},
+    \quad
+    m_{g,k}=v_{g,k}\Bigl(\tfrac{\mu_0}{\tau_0^2}+\tfrac{S_{g,k}}{\sigma^2}\Bigr),
+    \label{eq:posterior}
+\end{equation}
+and play the arm with the largest draw. Here $\mathcal N(\mu_0,\tau_0^2)$ is a fixed, deliberately vague prior guess (any $\tau_0\ge\sigma$ works). In words: each arm's draw is centered at its running average with a spread that shrinks as the arm accumulates data, so well-measured good arms win almost always while poorly measured arms still win occasionally --- exploration happens by itself, without a schedule. This rule is \emph{Thompson sampling}.
+
+Simultaneously, a \emph{change detector} watches the rewards. When Track begins, the current averages are frozen into a baseline $b_k=\widehat\mu_{g,k}$ and per-arm counters $G_k$ are set to zero. After each round, the counter of the played arm $a=A_t$ is updated by
+\begin{equation}
+    G_a\leftarrow\max\bigl\{0,\;G_a+|Y_t-b_a|-\nu\bigr\} .
+    \label{eq:cusum}
+\end{equation}
+The counter accumulates \emph{surprise}: how far the reward fell from what this regime predicts, minus an allowance $\nu$ for ordinary noise. While the regime is stable the allowance wins and the counter keeps returning to zero; after a genuine change the surprise wins every round and the counter climbs steadily. When a counter reaches a threshold $h$, an \emph{alarm} fires: the algorithm discards that one triggering observation and returns to Acquire. All other observations are recorded into the entry immediately. Freezing the baseline matters: a running average would follow the drift and hide it.
+
+\begin{algorithm}[t]
+\caption{Recurrence-Aware Thompson Sampling (RA-TS)}
+\label{alg:rats}
+\begin{algorithmic}[1]
+\Require arms $K$, noise scale $\sigma$, prior $(\mu_0,\tau_0)$, probe length $n_0$, match tolerance $\taum$, detector allowance $\nu$, threshold $h$
+\State library $\gets\emptyset$;\; mode $\gets$ Acquire;\; probe buffer $\gets$ empty
+\For{$t=1,\dots,T$}
+\If{mode $=$ Acquire}
+   \State play the least-sampled arm of the buffer; record the reward in the buffer
+   \If{every arm has $n_0$ buffer samples}
+      \State $\widehat\xi\gets$ buffer shape;\; $g^\star\gets$ library entry with the smallest $D_g$
+      \If{library nonempty \textbf{and} $D_{g^\star}\le\taum$}
+         \State add buffer to entry $g^\star$;\; $g\gets g^\star$ \Comment{regime recognized: warm start}
+      \Else
+         \State create a new entry from the buffer;\; $g\gets$ new entry \Comment{new regime}
+      \EndIf
+      \State mode $\gets$ Track;\; freeze baseline $b\gets\widehat\mu_g$;\; $G\gets0$
+   \EndIf
+\Else \Comment{mode $=$ Track}
+   \State draw $\widetilde\mu_k$ for all $k$ by \eqref{eq:posterior}; play $a=\argmax_k\widetilde\mu_k$; observe $Y_t$
+   \State $G_a\gets\max\{0,\,G_a+|Y_t-b_a|-\nu\}$
+   \If{$G_a\ge h$}
+      \State discard this observation; mode $\gets$ Acquire; reset buffer \Comment{alarm}
+   \Else
+      \State $S_{g,a}\gets S_{g,a}+Y_t$;\; $N_{g,a}\gets N_{g,a}+1$ \Comment{record immediately}
+   \EndIf
+\EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabularx}{\textwidth}{@{}c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}p{0.40\textwidth}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} & \textbf{How it is set} \\
+\midrule
+$K$ & number of arms (controllers) & given by the problem \\
+$\sigma$ & noise scale & estimated from data \\
+$\mu_0,\tau_0$ & prior mean and spread for \eqref{eq:posterior} & $\mu_0\approx$ typical reward; $\tau_0\ge\sigma$, vague \\
+$n_0$ & probe samples per arm & large enough for \eqref{eq:conditions}; theory: $O(\log T)$; practice: a few \\
+$\taum$ & shape-match tolerance & $\dsh/4$ \\
+$\nu$ & detector allowance per round & slightly above the typical noise magnitude, Eq.~\eqref{eq:conditions} \\
+$h$ & detector alarm threshold & Eq.~\eqref{eq:conditions}; larger $h$: fewer false alarms, slower detection \\
+$\delta$ & admissible failure probability of all guarantees & e.g.\ $0.05$ \\
+\bottomrule
+\end{tabularx}
+\caption{The parameters of RA-TS. Derived quantities used in the analysis: the confidence radius $r(n)=\sigma\sqrt{2L/n}$ with the log factor $L=\log\bigl(12(|\Rcal|{+}1)KT^3/\delta\bigr)$; the impurity bias $\eimp$ of Eq.~\eqref{eq:eimp}; the tolerance $\etol$ of Eq.~\eqref{eq:etol}.}
+\label{tab:params}
+\end{table}
+
+\paragraph{The one subtlety: contamination.}
+Between a hidden regime change and the alarm that catches it, the algorithm still believes the old regime is active, so a few rewards generated by the \emph{new} regime are recorded into the \emph{old} entry. We call these samples \emph{dirty}. The delayed-detection window will be shown to last at most $d$ rounds, so each visit to a regime deposits at most $d$ dirty samples into its entry. The central message of the analysis is that this bounded contamination shifts every stored average by at most a small, fixed bias --- and everything else survives that bias.
+
+% =============================================================================
+\section{Assumptions and the main result}
+% =============================================================================
+
+Four assumptions, each with its reason.
+
+\begin{assumption}[Light-tailed noise]
+\label{ass:noise}
+Conditionally on the past, $\varepsilon_t$ has mean zero and is sub-Gaussian with proxy $\sigma$.
+\emph{(Why: this is what makes averages of $n$ samples concentrate within $\sim\sigma/\sqrt n$ of the truth.)}
+\end{assumption}
+
+\begin{assumption}[Separated shapes]
+\label{ass:sep}
+Any two distinct regimes differ in shape by at least $\dsh>0$ (in the largest-coordinate sense).
+\emph{(Why: regimes that look alike cannot be told apart by any method; $\dsh$ quantifies ``look different''.)}
+\end{assumption}
+
+\begin{assumption}[Visible changes]
+\label{ass:vis}
+At every regime switch, \emph{every} arm's mean moves by at least $\eta_{\min}>0$.
+\emph{(Why: the detector only sees the arm currently being played; if a switch left the played arm's mean unchanged, no reward-based detector could see it. Requiring all arms to move makes detection provable no matter which arm is being played; in practice it holds when switches move the overall level, and a weaker per-arm version is discussed in Remark~\ref{rem:limits}.)}
+\end{assumption}
+
+\begin{assumption}[Long-enough episodes]
+\label{ass:dwell}
+Every episode lasts at least $m_{\min}\ge n_0K+d+1$ rounds, where $d$ is the detection delay bound below.
+\emph{(Why: an episode must at least outlive the detection of the previous change plus one probe; otherwise a probe could straddle two regimes and fingerprint a mixture. Short straddling episodes are excluded from the theory; experiments show they cause only occasional duplicate library entries.)}
+\end{assumption}
+
+\paragraph{Parameter conditions.}
+Write $\nun=\sigma\sqrt{2\ln2}\approx1.18\,\sigma$ for the detector's noise floor,\footnote{Why $\sqrt{2\ln2}$ and not the mean $|{\rm noise}|$? The detector analysis needs not just the \emph{average} of $|\varepsilon_t|$ to sit below the allowance, but its \emph{fluctuations} to be exponentially controlled; $\nun$ is the level at which that control comes for free from the sub-Gaussian property (Fact~\ref{fact:conc}(c)).} and let $L$, $r(n)$ be as in Table~\ref{tab:params}. The parameters must satisfy, for some margin $\beta_0>0$:
+\begin{equation}
+\begin{aligned}
+&\nu=\beta_0+\nun,
+\qquad
+\gamma_0=\eta_{\min}-2\beta_0-2\nun>0,
+\qquad
+h=\frac{\sigma L}{\sqrt{2\ln2}},
+\qquad
+d=\Bigl\lceil\frac{(K{+}1)h}{\gamma_0}\Bigr\rceil,\\[2pt]
+&n_0\ge d,
+\qquad
+\max\Bigl\{\,r(n_0),\ \sqrt2\,r(n_0)+\eimp\Bigr\}\le\beta_0,\\[2pt]
+&r(n_0)\le\frac{\dsh}{32},
+\qquad
+\eimp\le\frac{\dsh}{32},
+\qquad
+\taum=\frac{\dsh}{4},
+\end{aligned}
+\label{eq:conditions}
+\end{equation}
+where the \emph{impurity bias} is
+\begin{equation}
+    \eimp=\frac{dB+2\sigma\sqrt{2Ld}}{n_0} .
+    \label{eq:eimp}
+\end{equation}
+These conditions are solvable whenever $\eta_{\min}>2\nun$: choose $\beta_0=\min\{\dsh/16,(\eta_{\min}-2\nun)/4\}$, which fixes $\nu,\gamma_0,h,d$; then take $n_0$ large enough --- all remaining conditions only get easier as $n_0$ grows. Nothing is circular: $d$ does not depend on $n_0$.
+
+Finally define the \emph{tolerance}
+\begin{equation}
+    \etol=8\Bigl(\eimp+\frac{M_0}{n_0}\Bigr),
+    \qquad
+    M_0=\frac{\sigma^2}{\tau_0^2}\max_{r,k}|\mu_0-\mu_{r,k}| ,
+    \label{eq:etol}
+\end{equation}
+which collects the two small systematic biases the algorithm lives with: contamination ($\eimp$) and the pull of the prior ($M_0/n_0$). Note $\etol\to0$ as the probe grows.
+
+\begin{theorem}[Regret of RA-TS]
+\label{thm:main}
+Under Assumptions \ref{ass:noise}--\ref{ass:dwell} and the conditions \eqref{eq:conditions}, there are universal constants $c_1,c_2$ such that
+\begin{equation}
+    \E[\Reg_T]
+    \;\le\;
+    \underbrace{\sum_{r\in\Rcal}\ \sum_{\substack{k\ne k^\star(r)\\ \Delta_{r,k}>\etol}}
+    \Bigl(\frac{c_1\,\sigma^2L}{\Delta_{r,k}}+c_2\,\Delta_{r,k}\Bigr)}_{\text{(i) learning, once per regime}}
+    \;+\;
+    \underbrace{\etol\,T}_{\text{(ii) tolerance}}
+    \;+\;
+    \underbrace{\Delta_{\max}\,G_T\,(n_0K+d)}_{\text{(iii) per-switch overhead}}
+    \;+\;
+    \underbrace{\Delta_{\max}\,T\,\delta}_{\text{(iv) failure}} ,
+    \label{eq:mainbound}
+\end{equation}
+where $\Delta_{\max}$ bounds the one-round regret and $L=\log(12(|\Rcal|{+}1)KT^3/\delta)$.
+\end{theorem}
+
+Reading the four terms. \textbf{(i)} is the classical cost of learning which arm is best --- of order $(\log T)/\Delta$ per suboptimal arm --- but paid once per \emph{distinct regime}: since the library resumes a returning regime's record, revisits do not restart the learning. A method that restarts at every switch pays this term once per \emph{episode}, i.e.\ $G_T$ times instead of $|\Rcal|$ times; that replacement is the entire benefit of the memory. \textbf{(ii)} is the honest price of contamination: an arm whose gap is smaller than the tolerance $\etol$ might never be distinguished from the best arm, but by definition playing it costs at most $\etol$ per round. \textbf{(iii)} says every switch costs a bounded overhead --- one probe ($n_0K$ rounds) plus one detection delay ($\le d$ rounds). \textbf{(iv)} is the small probability that any of the statistical guarantees fails, times the worst case.
+
+\begin{remark}[What ``bounded regret'' means here]
+Total regret cannot stay bounded as $T\to\infty$ --- that is impossible even with a single fixed regime. The meaningful statement is that \emph{average} regret $\E[\Reg_T]/T$ tends to zero provided switches are not too frequent ($G_T$ grows sublinearly) and the probe is calibrated so that $\etol\to0$.
+\end{remark}
+
+% =============================================================================
+\section{The probability toolbox}
+% =============================================================================
+
+Every probabilistic step in the proof is an instance of one principle: \emph{an average of $n$ independent-noise terms is, with high probability, within $r(n)=\sigma\sqrt{2L/n}$ of its mean --- simultaneously for all the groups of samples the algorithm ever forms.} We package this as a single Fact.
+
+\begin{fact}[The good event]
+\label{fact:conc}
+With probability at least $1-\delta$, all of the following hold simultaneously, for all arms, regimes, group sizes and time windows at once:
+\begin{enumerate}[leftmargin=1.6em,label=(\alph*)]
+\item \textbf{Averages.} For every arm $k$ and regime $r$: the average of any first-$n$ block of the rewards collected from arm $k$ while $r$ was active deviates from $\mu_{r,k}$ by at most $r(n)$.
+\item \textbf{Stretches.} The same bound holds for every \emph{contiguous stretch} of such rewards (not only blocks starting at the beginning), with $r(\cdot)$ evaluated at the stretch length.
+\item \textbf{Surprise budget.} For every set of consecutive rounds, and likewise for every set of consecutive plays of one arm,
+\[
+    \sum_{t\in\text{window}}\bigl(|\varepsilon_t|-\nun\bigr)\;\le\;c_3:=\frac{\sigma L}{\sqrt{2\ln2}} .
+\]
+\end{enumerate}
+\end{fact}
+
+\noindent\emph{About the proof.} Each single statement is a Hoeffding-type tail bound; (c) additionally uses that $\E\,e^{\lambda|\varepsilon|}\le2e^{\lambda^2\sigma^2/2}$, which is where the constant $\nun=\sigma\sqrt{2\ln2}$ comes from. A union bound over all (at most $T^2$ per family) groups and windows gives the log factor $L$. One point genuinely requires care: the algorithm decides \emph{adaptively} which arm to play, so the samples in a group are collected at data-dependent times, and the textbook i.i.d.\ bounds do not literally apply. The standard resolution is to use the martingale (Azuma--Hoeffding) versions of these inequalities, which hold provided each sample's \emph{inclusion} in a group is decided before its value is seen. Checking that condition for RA-TS --- including the two places where it is delicate (probe samples are routed to an entry only after being observed; the alarm-triggering sample is discarded because of its own value) --- is exactly the technical content of the companion note, and is the reason statement (b) is about \emph{stretches}: the delicate samples always form short contiguous stretches, which (b) controls without ever conditioning on their values. For this note, Fact~\ref{fact:conc} is the interface: everything below is a deterministic consequence of it.
+
+From now on, ``on the good event'' means: assuming the three properties of Fact~\ref{fact:conc}. All lemmas below hold on the good event; the failure probability $\delta$ enters the theorem only through term (iv).
+
+% =============================================================================
+\section{Analysis}
+% =============================================================================
+
+The proof has five steps, each with a one-line summary:
+\begin{enumerate}[leftmargin=1.8em,itemsep=1pt]
+\item \emph{Library accuracy}: every stored average is correct up to $\sqrt2\,r(N)+\eimp$, despite contamination.
+\item \emph{Recognition}: with accurate shapes and separated regimes, the probe always matches correctly.
+\item \emph{Detection}: no false alarms; every change is caught within $d$ rounds.
+\item \emph{Consistency}: steps 1--3 support each other episode after episode (a short induction).
+\item \emph{Learning cost}: Thompson sampling on a slightly biased record pays the classical logarithmic cost per regime, plus the tolerance.
+\end{enumerate}
+
+\subsection{Step 1: library accuracy under contamination}
+
+\begin{lemma}[Impure averages are still accurate]
+\label{lem:impure}
+On the good event, suppose entry $g$ belongs to regime $r$ and has received $V$ visits. As Step 4 will confirm, each visit affects the record of arm $k$ in only three ways: it contributes at least $n_0$ clean probe samples; it may deposit at most $d$ \emph{dirty} samples (rewards from a different regime, recorded during the detection delay at the \emph{end} of the visit, in one contiguous run); and it may cause at most $d$ of regime $r$'s own samples to be \emph{displaced} into a different entry (recorded there during the detection delay at the \emph{start} of the visit, again in one contiguous run). Then for every arm $k$,
+\begin{equation}
+    \bigl|\widehat\mu_{g,k}-\mu_{r,k}\bigr|
+    \;\le\;
+    \sqrt2\,r(N_{g,k})+\eimp .
+    \label{eq:impure}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+The $N=N_{g,k}$ samples \emph{recorded in $g$} consist of clean ones (generated by regime $r$) and dirty ones (generated by other regimes during end-of-visit delays); there are at most $dV$ dirty ones. Their average deviates from $\mu_{r,k}$ by
+\[
+\widehat\mu_{g,k}-\mu_{r,k}
+=\frac1N\Bigl(\underbrace{\textstyle\sum_{\rm clean}\varepsilon_i}_{(a)}
++\underbrace{\textstyle\sum_{\rm dirty}\varepsilon_i}_{(b)}
++\underbrace{\textstyle\sum_{\rm dirty}(\mu_{z_i,k}-\mu_{r,k})}_{(c)}\Bigr),
+\]
+obtained by writing each recorded reward as $Y_i=\mu_{z_i,k}+\varepsilon_i$ and subtracting $\mu_{r,k}$: clean rewards contribute only their noise (a), dirty rewards contribute their noise (b) and their mean offset (c).
+
+The difficulty is that (a) is a sum of noise over a \emph{selected} subset of arm $k$'s regime-$r$ rewards, and we may not apply a concentration bound to an arbitrary selection. The way around this is that the selection is not arbitrary: the clean rewards recorded in $g$ are \emph{all} of regime $r$'s arm-$k$ rewards \emph{except} the displaced stretches (one per visit, each of length $\le d$, from the start-of-visit delays where those rewards went to a different entry). So, ordering all of regime $r$'s arm-$k$ rewards by time, the clean-in-$g$ set is an initial block of some length $n_{\rm pre}$ minus at most $V$ short gaps. We can therefore write $\sum_{\rm clean}\varepsilon_i = (\text{sum over the whole block}) - (\text{sums over the gaps})$ and bound each piece by the good event, which controls \emph{all} blocks (Fact~\ref{fact:conc}(a)) and \emph{all} stretches (Fact~\ref{fact:conc}(b)) at once --- never conditioning on which rewards were selected.
+
+\emph{(a)} The whole block has length $n_{\rm pre}\le 2N$ (the gaps total at most $dV\le n_0V\le N$ clean samples since $n_0\ge d$, so removing them at most doubles the count), so by Fact~\ref{fact:conc}(a) its noise sum is at most $\sigma\sqrt{2\,n_{\rm pre}\,L}\le\sigma\sqrt{4NL}=2\sigma\sqrt{NL}$; each of the $\le V$ gaps has length $\le d$ and by Fact~\ref{fact:conc}(b) contributes at most $\sigma\sqrt{2dL}$. Hence $|(a)|\le 2\sigma\sqrt{NL}+V\sigma\sqrt{2dL}$.
+\emph{(b)} The dirty samples likewise form at most $V$ contiguous stretches of length $\le d$ (one end-of-visit delay per visit); by Fact~\ref{fact:conc}(b), $|(b)|\le V\sigma\sqrt{2dL}$.
+\emph{(c)} Each dirty sample's mean differs from $\mu_{r,k}$ by at most $B$, so $|(c)|\le dVB$.
+Divide by $N$ and use $N\ge n_0V$ (each visit's probe alone contributes $n_0$ clean samples):
+\[
+\bigl|\widehat\mu_{g,k}-\mu_{r,k}\bigr|
+\le\frac{2\sigma\sqrt{NL}}{N}+\frac{2V\sigma\sqrt{2dL}+dVB}{N}
+\le\sqrt2\,r(N)+\frac{2\sigma\sqrt{2dL}+dB}{n_0}
+=\sqrt2\,r(N)+\eimp . \qedhere
+\]
+\end{proof}
+
+(The extra factor $\sqrt2$ in front of $r(N)$ is exactly the cost of the displaced samples: they can make the underlying block up to twice as long as the recorded count $N$, and $\sqrt{2N}$ inside the radius becomes $\sqrt2$ outside.)
+
+The point to remember: each visit adds at most $d$ dirty samples but at least $n_0$ clean ones per arm, so the \emph{fraction} of contamination never exceeds $d/n_0$, no matter how many visits occur. That is why the bias $\eimp$ is a fixed constant rather than a growing quantity. Since shapes are centered averages, and centering at most doubles a worst-coordinate error, the entry's shape is accurate to $2\sqrt2\,r(n_0)+2\eimp$, and a fresh (clean) probe's shape is accurate to $2r(n_0)$ by Fact~\ref{fact:conc}(b).
+
+\subsection{Step 2: recognition is correct}
+
+\begin{lemma}[Correct matching]
+\label{lem:match}
+On the good event, a probe collected inside an episode of regime $r$ is matched to $r$'s entry if one exists, and otherwise triggers the creation of a new entry.
+\end{lemma}
+
+\begin{proof}
+All shape errors are small by Step 1 and condition \eqref{eq:conditions}: the probe's shape is within $2r(n_0)\le\dsh/16$ of $\theta_r$, and any entry's shape is within $2\sqrt2\,r(n_0)+2\eimp\le\dsh/6$ of its own regime's shape. If $r$'s entry exists, the triangle inequality gives a distance at most $\dsh/16+\dsh/6<\dsh/4=\taum$: it passes the test. Any \emph{other} entry belongs to a regime at shape distance at least $\dsh$ (Assumption~\ref{ass:sep}), so its distance to the probe is at least $\dsh-\dsh/16-\dsh/6>\dsh/2>\taum$: it fails the test and is also farther than the correct entry. If $r$ has no entry yet, every existing entry fails the test, so a new entry is created.
+\end{proof}
+
+\subsection{Step 3: the detector}
+
+Recall the detector's counter for arm $a$ grows by $|Y_t-b_a|-\nu$ (floored at zero) on each play of $a$. Two properties are needed: it must stay quiet while the regime is stable, and fire fast when it is not. Both follow from the surprise budget, Fact~\ref{fact:conc}(c), and from the baseline being accurate: by Step 1, at the moment Track starts, $|b_k-\mu_{r,k}|\le\beta_0$ for every $k$ (condition \eqref{eq:conditions}).
+
+\begin{lemma}[No false alarms]
+\label{lem:fa}
+On the good event, no alarm fires while the regime that was identified is still active.
+\end{lemma}
+
+\begin{proof}
+While the regime is stable, the reward of the played arm $a$ is $\mu_{r,a}+\varepsilon_t$, so the surprise is $|Y_t-b_a|\le|\varepsilon_t|+\beta_0$. A standard property of the counter \eqref{eq:cusum} is that its value equals the largest running sum of $(|Y_t-b_a|-\nu)$ over any recent stretch of plays of $a$. For every such stretch of length $m$,
+\[
+\sum\bigl(|Y_t-b_a|-\nu\bigr)
+\;\le\;\sum\bigl(|\varepsilon_t|-\nun\bigr)+m\,(\beta_0+\nun-\nu)
+\;\le\;c_3+0=h ,
+\]
+using Fact~\ref{fact:conc}(c) for the first sum and $\nu=\beta_0+\nun$ for the second. So no counter can exceed the threshold $h=c_3$.\footnote{To rule out the marginal case of exact equality, the implementation uses the alarm condition $G_a\ge h$ with $h$ increased by an arbitrarily small amount; we ignore this detail.}
+\end{proof}
+
+\begin{lemma}[Fast detection]
+\label{lem:delay}
+On the good event, if the regime changes while Track is active, an alarm fires within $d=\lceil(K{+}1)h/\gamma_0\rceil$ rounds.
+\end{lemma}
+
+\begin{proof}
+After the change, whatever arm $a$ is played, its new mean differs from the frozen baseline by at least $\eta_{\min}-\beta_0$ (Assumption~\ref{ass:vis} plus baseline accuracy), so the per-round surprise is at least $(\eta_{\min}-\beta_0)-|\varepsilon_t|$. Suppose $D$ rounds pass with no alarm. Each round feeds exactly one arm's counter, and each counter is at least the running sum of its own increments, so \emph{summing over arms},
+\[
+\sum_{a=1}^K G_a
+\;\ge\;\sum_{t\ \rm post-change}\bigl(|Y_t-b_{A_t}|-\nu\bigr)
+\;\ge\; D\,(\eta_{\min}-\beta_0-\nu)-\sum_{t}|\varepsilon_t|
+\;\ge\; D\,(\eta_{\min}-\beta_0-\nu-\nun)-c_3 ,
+\]
+where the last step used Fact~\ref{fact:conc}(c) on the post-change window. The bracket equals $\gamma_0+\beta_0\ge\gamma_0$ by \eqref{eq:conditions}. If no alarm has fired, every counter is below $h$, so the left side is below $Kh$; hence $D\gamma_0<Kh+c_3=(K{+}1)h$, i.e.\ $D<d$. So an alarm must fire by round $d$ after the change. During those at most $d$ rounds, at most $d$ observations generated by the new regime are recorded into the old entry (the alarm-triggering one is discarded) --- this is precisely the contamination that Step 1 was built to absorb.
+\end{proof}
+
+\subsection{Step 4: the loop closes}
+
+Steps 1--3 lean on each other: accuracy needs the contamination budget, which needs fast detection, which needs an accurate baseline, which needs correct matching, which needs accuracy. The resolution is chronological: each step, at any moment, only relies on the others having held \emph{so far}.
+
+\begin{lemma}[Correct operation, whole run]
+\label{lem:induction}
+On the good event, for the entire run: every probe sits inside a single episode; every match is correct (so entries correspond one-to-one to the distinct regimes seen, and at most $|\Rcal|$ entries are ever created); every entry's contamination stays within the budget of Lemma~\ref{lem:impure}; every baseline is accurate to $\beta_0$; there are no false alarms; and every change is detected within $d$ rounds.
+\end{lemma}
+
+\begin{proof}
+Induction along the run's sequence of probes and alarms. \emph{Start:} the first probe begins at $t=1$ and, since episodes last at least $n_0K+d+1$ rounds (Assumption~\ref{ass:dwell}), finishes inside episode 1; the library is empty, so a new entry is created --- trivially correct --- with $n_0$ clean samples per arm and an accurate baseline (Step 1 with $V=1$, no dirty samples). \emph{Maintenance:} assume everything has held so far, and Track is running on the correct entry with an accurate baseline. By Lemma~\ref{lem:fa} no alarm fires while the episode lasts. When the episode ends, Lemma~\ref{lem:delay} gives an alarm within $d$ rounds, and at most $d$ dirty samples enter the old entry --- within its budget, since this is one visit's allowance. The probe that follows finishes within $d+n_0K$ rounds of the change, hence inside the new episode (Assumption~\ref{ass:dwell}): it is clean. By Lemma~\ref{lem:match} (whose accuracy inputs hold by the inductive hypothesis and Lemma~\ref{lem:impure}) the probe is matched correctly, adding $n_0$ clean samples per arm to the right entry; the new baseline is accurate by Lemma~\ref{lem:impure} and \eqref{eq:conditions}. All claims are maintained.
+\end{proof}
+
+\subsection{Step 5: the cost of learning within a regime}
+
+It remains to count the regret spent during Track. Fix a regime $r$ and consider all its Track rounds pooled across visits --- thanks to the warm start, the entry's record simply keeps growing, so this is one continuous learning process. Write $\Delta_k=\Delta_{r,k}$ and let arm $1$ be the best arm of $r$.
+
+By Lemma~\ref{lem:impure} and \eqref{eq:etol}, at every Track round each arm's posterior center $m_{g,k}$ satisfies
+\begin{equation}
+    |m_{g,k}-\mu_{r,k}|\;\le\;\sqrt2\,r(N_k)+\tfrac18\etol ,
+    \label{eq:bias}
+\end{equation}
+(the $\tfrac18\etol$ collects the contamination bias and the prior pull). Now distinguish two kinds of suboptimal arms.
+
+\paragraph{Arms inside the tolerance ($\Delta_k\le\etol$).}
+For these the bias can be comparable to the gap, so the algorithm may never rank them correctly --- but each play costs at most $\Delta_k\le\etol$. Over the whole horizon these arms cost at most $\etol\,T$: term (ii) of the theorem. This is the precise sense in which contamination acts as a small optimality tolerance rather than a failure.
+
+\paragraph{Arms outside the tolerance ($\Delta_k>\etol$).}
+For these the bias is at most $\Delta_k/8$, a harmless fraction of the gap, and the classical Thompson-sampling argument goes through with slightly widened margins. We bound the expected number of plays of such an arm $k$ by splitting them three ways:
+\begin{itemize}[leftmargin=1.6em]
+\item \emph{While under-sampled} ($N_k<\ell_k:=\lceil1024\,\sigma^2L/\Delta_k^2\rceil$): at most $\ell_k$ plays, by counting.
+\item \emph{Well-sampled but a lucky draw}: once $N_k\ge\ell_k$, the posterior center is (by \eqref{eq:bias}) at least $\tfrac{9}{16}\Delta_k$ below the bar $y_k=\mu_1-\Delta_k/4$, and the posterior spread is at most $\Delta_k/(32\sqrt L)$; a Gaussian draw then exceeds the bar with probability at most $e^{-162L}\le1/T$. Total expected contribution: at most $1$.
+\item \emph{Blocked by a pessimistic best arm}: rounds where arm $k$'s draw is \emph{below} the bar yet arm $k$ is still played --- which requires the best arm's draw to be below the bar too. This is the one genuinely subtle term in any Thompson-sampling proof. The standard estimate (stated below as Fact~\ref{fact:blocked}) bounds it by $C_0\bigl(1+\sigma^2/\Delta_k^2\bigr)(1+\log T)$.
+\end{itemize}
+
+\begin{fact}[The best arm cannot stay blocked; \textnormal{Agrawal--Goyal 2013; Lattimore--Szepesv\'ari 2020, Ch.\,36}]
+\label{fact:blocked}
+Consider Thompson sampling with Gaussian draws \eqref{eq:posterior}, where the best arm's center concentrates around its true mean (up to a fixed offset $\zeta$) as its sample count grows, and let $y\le\mu_1-2\zeta$. Then the expected total number of rounds in which a suboptimal arm is played while its draw is below $y$ is at most $C_0(1+\sigma^2/\zeta^2)(1+\log T)$ for a universal constant $C_0$.
+\emph{In words: for the best arm to be overtaken by an arm whose draw is poor, the best arm's own draw must be poor too; but a pessimistic estimate of the best arm is both unlikely (its average concentrates) and self-correcting (its posterior spread keeps giving it chances), so the total time spent ``blocked'' is only logarithmic.}
+\end{fact}
+
+We apply the Fact with $\zeta=\Delta_k/8$, which the margin \eqref{eq:bias} justifies. (The companion note verifies the Fact's hypotheses in detail --- including that the probe's extra samples and the contamination only help or are absorbed in $\zeta$ --- and handles the small probability that the accuracy bounds fail, which is covered by term (iv).) Summing the three contributions, the expected number of plays of arm $k$ is at most
+\[
+\ell_k+1+C_0\Bigl(1+\frac{\sigma^2}{\Delta_k^2}\Bigr)(1+\log T)
+\;=\;O\Bigl(\frac{\sigma^2L}{\Delta_k^2}\Bigr),
+\]
+and each play costs $\Delta_k$, giving the $\bigl(c_1\sigma^2L/\Delta_k+c_2\Delta_k\bigr)$ of term (i).
+
+\subsection{Assembling the theorem}
+
+\begin{proof}[Proof of Theorem~\ref{thm:main}]
+With probability at least $1-\delta$ the good event holds; otherwise regret is at most $\Delta_{\max}T$, giving term (iv). On the good event, Lemma~\ref{lem:induction} organizes the whole run: each of the $G_T$ episodes spends at most $d$ rounds in the detection delay of the previous change and exactly $n_0K$ rounds probing --- at most $\Delta_{\max}(n_0K+d)$ regret per episode, term (iii) --- and all remaining rounds are Track rounds on the correct entry. Pooling each regime's Track rounds across visits, Step 5 bounds their cost: arms outside the tolerance contribute term (i); arms inside it contribute at most $\etol$ per round, hence term (ii) over the horizon. (Rounds inside detection delays are already counted in (iii); counting some of them again in Step 5 only weakens the bound.) Summing over regimes completes the proof.
+\end{proof}
+
+% =============================================================================
+\section{Remarks}
+% =============================================================================
+
+\begin{remark}[Why the probe cannot be dropped]
+It is tempting to let Thompson sampling itself do the identification after an alarm, with a wide-open prior. This fails, for a clean reason: recognizing a regime requires a few samples of \emph{every} arm --- including the bad ones --- but Thompson sampling is built to stop playing arms that look bad. Coverage is then never reached, identification never happens, and (since the detector runs only in Track) the algorithm goes blind. The probe supplies exactly the missing samples, at a bounded, once-per-episode cost. This is also what experiments show: the probe-free variant's regret is several times larger.
+\end{remark}
+
+\begin{remark}[Why contamination is tolerated rather than removed]
+\label{rem:tolerate}
+Two mechanisms could remove the contamination instead of tolerating it, and it is instructive that both cost more than they save. \emph{(i) A delayed-commit queue} holds each observation for $q$ rounds and records it only if no alarm intervenes. This keeps the library perfectly clean but has two defects: the keep/discard decision then depends on \emph{future} data (the discarded samples are exactly those with large deviations, so the retained ones are biased), and the acting posterior runs $q$ samples behind --- a delayed-feedback lag with a real cost. \emph{(ii) Rollback} instead records every sample immediately (no lag) but, on an alarm, retroactively un-commits the contiguous run of samples that drove the detector up --- the standard change-point segment. This is statistically sound \emph{provided the discarded set is that contiguous run and not the individually large-residual samples}: a size-filtered removal would again be a future-/value-dependent selection that biases the retained average. Rollback is the better of the two (it removes contamination without the lag). Empirically, both underperform the plain immediate-commit algorithm: on frequent switching, where data per regime is scarce, discarding samples --- whether by queue or by rollback --- leaves library entries under-sampled and triggers extra re-identification that outweighs the cleaner statistics, while on long episodes the effects roughly cancel. The message is the one this analysis makes precise: the contamination is a bounded, quantifiable price ($\etol$) that is cheaper to pay than to remove.
+\end{remark}
+
+\begin{remark}[Limitations]
+\label{rem:limits}
+(1) Visibility: if a regime switch moved only the means of arms that are never played, no reward-based detector could see it; Assumption~\ref{ass:vis} (every arm moves) is the clean sufficient condition, and can be weakened to ``the currently played arm moves'' at the cost of a delay bound counted in plays of that arm. (2) Short episodes: if an episode is shorter than one detection delay plus one probe, the probe can straddle two regimes and fingerprint a mixture; the theory excludes this by Assumption~\ref{ass:dwell}, and in practice straddles occasionally create a duplicate library entry, which is quarantined by the detector and stops being matched --- library growth saturates quickly. (3) Near-ties: arms within $\etol$ of the best may never be resolved; they cost at most $\etol$ per round, and $\etol$ shrinks as the probe grows. All three limitations are intrinsic to the information available, not artifacts of the algorithm.
+\end{remark}
+
+\begin{remark}[Pointers]
+Complete references and the fully rigorous treatment (exact union bounds, adaptive-sampling concentration, the verification of Fact~\ref{fact:blocked}'s hypotheses, and the anytime version of the theorem) are in the companion note. The empirical evaluation --- two week-long simulated datasets with recurring regimes, where RA-TS outperforms both restart-based and certification-based alternatives, plus the ablations supporting the two remarks above --- is reported separately and will be integrated in the application paper.
+\end{remark}
+
+\end{document}

@@ -186,7 +186,7 @@ def make_policies(horizon_steps):
         "Fixed-C0":   bp.FixedArm(0),
         "Fixed-C1":   bp.FixedArm(1),
         "Fixed-C2":   bp.FixedArm(2),
-        "Rule-based": bp.RuleBased(seed=7),
+        "Rule-based": bp.RuleBased(3, floor=bp.rule_based_floor(ORACLE_TABLE), seed=7),
         "Oracle":     bp.Oracle(ORACLE_TABLE),
     }
 

@@ -1,3 +1,17 @@
+# --- repo path bootstrap (this script was moved into dev/; run it as
+#     `python dev/<name>.py` from the Lightsaber_X/ directory). Makes the
+#     Lightsaber_X package root, the bandit/ package, and this dev/ folder
+#     importable, and anchors the working dir to the package root so the
+#     relative data/output paths (noise_inputs/, *.npz, bandit_runs/) resolve. ---
+import os as _os, sys as _sys
+_DEV = _os.path.dirname(_os.path.abspath(__file__))
+_ROOT = _os.path.dirname(_DEV)
+for _p in (_ROOT, _os.path.join(_ROOT, 'bandit'), _DEV):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+_os.chdir(_ROOT)
+# --- end bootstrap ---
+
 """
 Paper characterization of reward(controller | regime).
 

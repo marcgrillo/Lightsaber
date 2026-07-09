@@ -1,0 +1,913 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm,bm,mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+
+\newcommand{\A}{\mathcal A}
+\newcommand{\F}{\mathcal F}
+\newcommand{\Sset}{\mathcal S}
+\newcommand{\Tset}{\mathcal T}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pp}{\mathbb P}
+\newcommand{\R}{\mathbb R}
+\newcommand{\one}{\bm 1}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\pos}[1]{\left[#1\right]_{+}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Level-Invariant Transition-Aware Recurrent UCB}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note describes a level-invariant variant of Transition-Aware Recurrent UCB for non-stationary bandits with recurrent regimes. The original regime library stores absolute reward vectors and therefore may fragment one physical regime into several labels when the overall reward level drifts. The revised algorithm stores and matches regimes through a centered, level-invariant shape representation. A returning regime can therefore be recognized even when its absolute reward level differs from previous visits. The method keeps the original transition-aware structure: it detects reward-collapse transitions, freezes stable-regime estimates during transitions, diagnoses the post-transition regime by probing all arms, reuses previously learned regimes, creates new regimes only after persistent evidence, and periodically merges duplicate regime labels. The note gives a complete mathematical description, a regret criterion, theorem statements, and proof sketches.
+\end{abstract}
+
+\section{Problem formulation}
+\label{sec:problem_formulation}
+
+Let
+\begin{equation}
+\label{eq:arm_set}
+\A=\{1,\ldots,K\}
+\end{equation}
+be a finite set of arms. At round $t=1,\ldots,T$, the learner selects one arm
+\begin{equation}
+\label{eq:selected_arm}
+A_t\in\A
+\end{equation}
+and observes only the reward of the selected arm,
+\begin{equation}
+\label{eq:observed_reward}
+Y_t\in\R .
+\end{equation}
+The learner does not observe the rewards of the unselected arms. The information available before the decision at time $t$ is
+\begin{equation}
+\label{eq:filtration}
+\F_{t-1}
+=
+\sigma(A_1,Y_1,\ldots,A_{t-1},Y_{t-1}).
+\end{equation}
+
+The environment alternates between stable episodes and transition periods. Stable episodes are associated with recurrent latent regimes. Transition periods are not assumed to be stationary; during such periods, all arms experience a substantial reward degradation. The learner does not observe the active regime or the transition times.
+
+\subsection{Stable regimes with nuisance level drift}
+\label{subsec:stable_regimes}
+
+Let
+\begin{equation}
+\label{eq:latent_regime}
+Z_t\in\{1,\ldots,S\}
+\end{equation}
+denote the latent stable regime at time $t$, whenever the process is in a stable episode. The number of distinct regimes $S$ is not assumed known by the learner.
+
+The essential modeling point is that the absolute reward level may change across visits to the same physical regime. Therefore, the mean reward vector in a stable episode is decomposed into an action-irrelevant common level and an action-relevant shape. Specifically, in stable regime $z$, the reward of arm $k$ is modeled as
+\begin{equation}
+\label{eq:stable_reward_model}
+Y_t
+=
+\ell_t+	heta_k^{(z)}+\varepsilon_t,
+\qquad A_t=k,
+\end{equation}
+where $\ell_t\in\R$ is a common reward level, $\bm\theta^{(z)}=(\theta_1^{(z)},\ldots,\theta_K^{(z)})$ is the regime-specific shape vector, and $\varepsilon_t$ is noise. The shape vector is normalized by
+\begin{equation}
+\label{eq:zero_sum_shape}
+\one^\top \bm\theta^{(z)}=0 .
+\end{equation}
+The common level $\ell_t$ may differ between visits to the same regime. Since $\ell_t$ is common to all arms, it does not affect the optimal arm. The best arm in regime $z$ is
+\begin{equation}
+\label{eq:best_arm}
+k^\star(z)
+\in
+\argmax_{k\in\A}\theta_k^{(z)}.
+\end{equation}
+For simplicity, ties are broken by the smallest index.
+
+The noise is assumed to satisfy a standard concentration condition.
+
+\begin{assumption}[Sub-Gaussian noise]
+\label{ass:subgaussian}
+There exists $\sigma>0$ such that, for every stable time $t$ and every $\lambda\in\R$,
+\begin{equation}
+\label{eq:subgaussian}
+\E\left[
+\exp\{\lambda\varepsilon_t\}
+\mid \F_{t-1}
+\right]
+\leq
+\exp\left(\frac{\lambda^2\sigma^2}{2}\right).
+\end{equation}
+\end{assumption}
+
+\subsection{Transition periods}
+\label{subsec:transitions}
+
+Regime changes are not assumed instantaneous. Between two stable regimes, the process may pass through a transition period during which rewards are depressed for all arms. If the pre-transition regime is $z$, then the beginning of the transition satisfies
+\begin{equation}
+\label{eq:drop_condition}
+\E[Y_t\mid A_t=k,\F_{t-1}]
+\leq
+\ell_t+\theta_k^{(z)}-d_{\min}
+\qquad \text{for all } k\in\A,
+\end{equation}
+for at least $\ell_{\mathrm{drop}}$ consecutive observations, where $d_{\min}>0$. This assumption is a detectability condition: the common reward drop must be large enough, and last long enough, for the learner to detect that the previously active stable regime is no longer valid.
+
+Transition periods may have variable duration. The algorithm must therefore not interpret a stable collapsed reward vector as a new stable regime. The revised algorithm includes a transition-collapse guard that prevents this failure mode.
+
+\section{Level-invariant regime representation}
+\label{sec:shape_representation}
+
+The original TAR-UCB library identifies regimes through the absolute empirical mean vector. This is inappropriate when the same physical regime can reappear at different absolute levels. The revised algorithm identifies regimes through a centered shape fingerprint.
+
+Define the centering matrix
+\begin{equation}
+\label{eq:centering_matrix}
+P
+=
+I_K-\frac{1}{K}\one\one^\top .
+\end{equation}
+For any vector $\bm v\in\R^K$, define its empirical level and centered shape by
+\begin{equation}
+\label{eq:level_definition}
+\bar v
+=
+\frac{1}{K}\one^\top \bm v,
+\end{equation}
+and
+\begin{equation}
+\label{eq:shape_map}
+\phi(\bm v)
+=
+P\bm v
+=
+\bm v-\bar v\one .
+\end{equation}
+The map $\phi$ removes common shifts across arms.
+
+\begin{lemma}[Level invariance]
+\label{lem:level_invariance}
+For every $\bm v\in\R^K$ and every $c\in\R$,
+\begin{equation}
+\label{eq:level_invariance}
+\phi(\bm v+c\one)=\phi(\bm v).
+\end{equation}
+Moreover,
+\begin{equation}
+\label{eq:argmax_invariance}
+\argmax_{k\in\A} v_k
+=
+\argmax_{k\in\A} (v_k+c).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Since $P\one=0$, one has $P(\bm v+c\one)=P\bm v+cP\one=P\bm v$. The second claim follows because adding the same constant to all coordinates does not change their ordering.
+\end{proof}
+
+The relevant separation between regimes is therefore not separation in absolute reward space, but separation in shape space:
+\begin{equation}
+\label{eq:shape_separation}
+\Delta_{\mathrm{sh}}
+=
+\min_{z\neq z'}
+\norm{\bm\theta^{(z)}-\bm\theta^{(z')}}_{\infty}.
+\end{equation}
+Reliable recurrence recognition requires
+\begin{equation}
+\label{eq:positive_shape_sep}
+\Delta_{\mathrm{sh}}>0.
+\end{equation}
+
+For each regime $z$ and arm $k$, define the action gap
+\begin{equation}
+\label{eq:arm_gap}
+\Delta_k^{(z)}
+=
+\theta_{k^\star(z)}^{(z)}-\theta_k^{(z)}.
+\end{equation}
+The maximum one-step stable regret is
+\begin{equation}
+\label{eq:max_gap}
+\Delta_{\max}
+=
+\max_{z\in\{1,\ldots,S\}}
+\max_{k\in\A}
+\Delta_k^{(z)}.
+\end{equation}
+
+\section{Regime library}
+\label{sec:regime_library}
+
+At time $t$, the learner has discovered $J_t$ regime labels,
+\begin{equation}
+\label{eq:library}
+\mathcal L_t=\{1,\ldots,J_t\}.
+\end{equation}
+A library element is no longer represented only by an absolute mean vector. Instead, it stores a shape estimate.
+
+For each stored regime $j$ and arm $k$, let $N_{j,k}(t)$ and $S_{j,k}(t)$ denote, respectively, the number and sum of de-levelled observations assigned to arm $k$ in regime $j$. The de-levelled observations are obtained from balanced probing blocks in which all arms are sampled over a short window. If $\mathcal B$ is such a block and
+\begin{equation}
+\label{eq:block_vector}
+\widehat{\bm v}_{\mathcal B}
+=
+(\widehat v_{\mathcal B,1},\ldots,\widehat v_{\mathcal B,K})
+\end{equation}
+is the vector of block means, then the corresponding shape observation is
+\begin{equation}
+\label{eq:block_shape}
+\widehat{\bm\theta}_{\mathcal B}
+=
+\phi(\widehat{\bm v}_{\mathcal B}).
+\end{equation}
+The library update for regime $j$ uses the coordinates of $\widehat{\bm\theta}_{\mathcal B}$:
+\begin{equation}
+\label{eq:library_sum_update_shape}
+S_{j,k}\leftarrow S_{j,k}+\widehat\theta_{\mathcal B,k},
+\qquad
+N_{j,k}\leftarrow N_{j,k}+1.
+\end{equation}
+The shape estimate of stored regime $j$ is
+\begin{equation}
+\label{eq:shape_estimate}
+\widehat\theta_{j,k}(t)
+=
+\frac{S_{j,k}(t)}{N_{j,k}(t)},
+\qquad
+\widehat{\bm\theta}^{(j)}(t)
+=
+(\widehat\theta_{j,1}(t),\ldots,\widehat\theta_{j,K}(t)).
+\end{equation}
+The current inferred regime label is denoted by
+\begin{equation}
+\label{eq:current_regime}
+\widehat Z_t\in\mathcal L_t.
+\end{equation}
+
+\begin{remark}[Why balanced blocks are used]
+A single reward observation cannot determine whether a change is due to the arm effect or to the common level. Balanced blocks produce a local reward vector, and centering that vector removes the local level. This prevents slow level drift from fragmenting one physical regime into several library labels.
+\end{remark}
+
+\subsection{Confidence radii}
+\label{subsec:confidence_radii}
+
+For $N_{j,k}(t)>0$, define
+\begin{equation}
+\label{eq:shape_confidence_radius}
+B_{j,k}^{\mathrm{sh}}(t)
+=
+C_{\phi}\sigma
+\sqrt{
+\frac{2\log(4KJ_t t^2/\delta)}{m_{\mathrm{blk}}N_{j,k}(t)}
+},
+\end{equation}
+where $m_{\mathrm{blk}}$ is the number of samples per arm used in a balanced block, $\delta\in(0,1)$ is a failure probability, and $C_{\phi}>0$ is a numerical constant accounting for centering. If $N_{j,k}(t)=0$, the coordinate is uninitialized and the algorithm collects a balanced block before using the stored regime for exploitation.
+
+The optimistic shape index is
+\begin{equation}
+\label{eq:shape_ucb_index}
+U_{j,k}^{\mathrm{sh}}(t)
+=
+\widehat\theta_{j,k}(t)+B_{j,k}^{\mathrm{sh}}(t).
+\end{equation}
+
+\section{The LI-TAR-UCB algorithm}
+\label{sec:algorithm}
+
+The revised algorithm is called \emph{Level-Invariant Transition-Aware Recurrent UCB} (LI-TAR-UCB). It has three modes:
+\begin{equation}
+\label{eq:modes}
+\textsc{Stable},
+\qquad
+\textsc{Transition},
+\qquad
+\textsc{Diagnostic}.
+\end{equation}
+
+\subsection{Initialization}
+\label{subsec:initialization}
+
+The algorithm begins with no regime in the library. It samples each arm $m_0$ times, forms the initial block mean vector
+\begin{equation}
+\label{eq:init_vector}
+\widehat{\bm v}^{(0)}
+=
+(\widehat v_1^{(0)},\ldots,\widehat v_K^{(0)}),
+\end{equation}
+and stores the centered vector
+\begin{equation}
+\label{eq:init_shape}
+\widehat{\bm\theta}^{(1)}
+=
+\phi(\widehat{\bm v}^{(0)})
+\end{equation}
+as the first regime. The algorithm sets
+\begin{equation}
+\label{eq:init_state}
+J=1,
+\qquad
+\widehat Z=1,
+\qquad
+G=0,
+\end{equation}
+and enters \textsc{Stable} mode.
+
+The initial absolute level
+\begin{equation}
+\label{eq:init_level}
+\widehat\ell_0=\frac{1}{K}\one^\top\widehat{\bm v}^{(0)}
+\end{equation}
+is retained only for transition detection. It is not used for regime identity.
+
+\subsection{Stable mode}
+\label{subsec:stable_mode}
+
+Suppose the algorithm is in \textsc{Stable} mode and the current inferred regime is $j=\widehat Z_t$. The selected arm is
+\begin{equation}
+\label{eq:stable_shape_ucb_rule}
+A_t
+\in
+\argmax_{k\in\A}
+\left\{
+\widehat\theta_{j,k}(t)+B_{j,k}^{\mathrm{sh}}(t)
+\right\}.
+\end{equation}
+The rule uses the estimated reward shape rather than the absolute reward level. A common upward or downward shift of all arms does not change the selected arm.
+
+For transition detection, the algorithm keeps a short-window estimate of the current nuisance level. Given recent stable observations assigned to regime $j$, define residual level estimates
+\begin{equation}
+\label{eq:level_residuals}
+\widehat\ell_s
+=
+Y_s-\widehat\theta_{j,A_s}(t),
+\end{equation}
+and set
+\begin{equation}
+\label{eq:current_level_estimate}
+\widehat\ell_t
+=
+\operatorname{mean}\{\widehat\ell_s: s\in\mathcal W_t\},
+\end{equation}
+where $\mathcal W_t$ is a recent stable window. The predicted reward for arm $A_t$ under the current stable regime is
+\begin{equation}
+\label{eq:stable_prediction}
+\widehat m_{t,A_t}
+=
+\widehat\ell_t+\widehat\theta_{j,A_t}(t).
+\end{equation}
+A lower prediction is
+\begin{equation}
+\label{eq:lower_prediction}
+\widehat L_{t,A_t}
+=
+\widehat\ell_t+
+\widehat\theta_{j,A_t}(t)-B_{j,A_t}^{\mathrm{sh}}(t).
+\end{equation}
+After observing $Y_t$, define the drop residual
+\begin{equation}
+\label{eq:drop_residual}
+R_t
+=
+\pos{\widehat L_{t,A_t}-Y_t}.
+\end{equation}
+The CUSUM statistic is
+\begin{equation}
+\label{eq:cusum}
+G_t
+=
+\max\{0,G_{t-1}+R_t-\nu\},
+\end{equation}
+where $\nu>0$ is a tolerance parameter. A transition is declared when
+\begin{equation}
+\label{eq:transition_alarm}
+G_t\geq h.
+\end{equation}
+If no transition is declared, the reward is used for level tracking. It is added to the shape library only through balanced blocks, not as an isolated absolute reward. If a transition is declared, the triggering reward is not assigned to any stable regime, $G_t$ is reset, and the algorithm enters \textsc{Transition} mode.
+
+\subsection{Transition mode with collapse guard}
+\label{subsec:transition_mode}
+
+In \textsc{Transition} mode, stable-regime estimates are frozen. The algorithm samples arms in round-robin batches. Let $m_{\mathrm{batch}}$ be the number of samples per arm in a transition batch. For batch $b$, define the batch vector
+\begin{equation}
+\label{eq:transition_batch_vector}
+\widehat{\bm v}^{(b)}
+=
+(\widehat v_1^{(b)},\ldots,\widehat v_K^{(b)}),
+\end{equation}
+where $\widehat v_k^{(b)}$ is the average reward obtained from arm $k$ in batch $b$. Define the batch shape
+\begin{equation}
+\label{eq:transition_batch_shape}
+\widehat{\bm\psi}^{(b)}
+=
+\phi(\widehat{\bm v}^{(b)}).
+\end{equation}
+
+The usual stability statistic is
+\begin{equation}
+\label{eq:stability_statistic}
+H_b
+=
+\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}.
+\end{equation}
+Stability alone is not sufficient, because the collapsed reward vector may itself become stable. The algorithm therefore also checks whether the batch is still consistent with a collapsed version of the pre-transition state.
+
+Let $\widehat\ell_{\mathrm{pre}}$ be the level estimate immediately before the transition alarm, and let $j_{\mathrm{pre}}$ be the pre-transition regime label. Define the pre-transition predicted vector
+\begin{equation}
+\label{eq:pre_transition_vector}
+\widehat{\bm m}_{\mathrm{pre}}
+=
+\widehat\ell_{\mathrm{pre}}\one+\widehat{\bm\theta}^{(j_{\mathrm{pre}})}.
+\end{equation}
+The estimated common drop of batch $b$ relative to this vector is
+\begin{equation}
+\label{eq:estimated_common_drop}
+\widehat d^{(b)}
+=
+\frac{1}{K}\one^\top
+\left(
+\widehat{\bm m}_{\mathrm{pre}}-\widehat{\bm v}^{(b)}
+\right).
+\end{equation}
+The batch is considered still collapsed if
+\begin{equation}
+\label{eq:collapse_condition_level}
+\widehat d^{(b)}\geq d_{\mathrm{exit}}
+\end{equation}
+and
+\begin{equation}
+\label{eq:collapse_condition_shape}
+\norm{\widehat{\bm\psi}^{(b)}-
+\widehat{\bm\theta}^{(j_{\mathrm{pre}})}}_{\infty}
+\leq r_{\mathrm{coll}}.
+\end{equation}
+The threshold $d_{\mathrm{exit}}>0$ specifies how much common reward loss is still interpreted as a transition-induced collapse, while $r_{\mathrm{coll}}$ allows for noise and mild non-common distortions.
+
+The transition mode ends only when the reward vector is stable and not collapsed. That is, the algorithm enters \textsc{Diagnostic} mode only if
+\begin{equation}
+\label{eq:transition_exit_condition}
+H_b\leq r_{\mathrm{stab}}
+\end{equation}
+and the conditions \eqref{eq:collapse_condition_level}--\eqref{eq:collapse_condition_shape} are not simultaneously satisfied, for $q_{\mathrm{stab}}$ consecutive batches.
+
+\subsection{Diagnostic mode: shape-based recurrence recognition}
+\label{subsec:diagnostic_mode}
+
+In \textsc{Diagnostic} mode, the learner estimates the current post-transition shape. It samples each arm $m_{\mathrm{cls}}$ times and forms the diagnostic vector
+\begin{equation}
+\label{eq:diagnostic_vector}
+\widehat{\bm v}
+=
+(\widehat v_1,\ldots,\widehat v_K).
+\end{equation}
+The diagnostic shape is
+\begin{equation}
+\label{eq:diagnostic_shape}
+\widehat{\bm\psi}
+=
+\phi(\widehat{\bm v}).
+\end{equation}
+For every stored regime $j\in\mathcal L_t$, compute the shape distance
+\begin{equation}
+\label{eq:shape_matching_distance}
+D_j^{\mathrm{sh}}
+=
+\norm{\widehat{\bm\psi}-\widehat{\bm\theta}^{(j)}(t)}_{\infty}.
+\end{equation}
+Let
+\begin{equation}
+\label{eq:nearest_shape_regime}
+j^\star
+\in
+\argmin_{j\in\mathcal L_t}D_j^{\mathrm{sh}}.
+\end{equation}
+If
+\begin{equation}
+\label{eq:matched_shape_condition}
+D_{j^\star}^{\mathrm{sh}}\leq r_{\mathrm{sh}},
+\end{equation}
+the current regime is classified as the already known regime $j^\star$, and the algorithm sets
+\begin{equation}
+\label{eq:set_matched_shape_regime}
+\widehat Z_t=j^\star.
+\end{equation}
+The diagnostic block shape is then added to the shape statistics of regime $j^\star$.
+
+If condition \eqref{eq:matched_shape_condition} fails, the algorithm does not immediately create a new regime. Instead, it stores the diagnostic shape in a temporary candidate buffer. A new regime is created only after $q_{\mathrm{new}}$ consecutive diagnostic blocks that are simultaneously stable, non-collapsed, and farther than $r_{\mathrm{sh}}$ from every stored regime. Formally, a new regime is created only if
+\begin{equation}
+\label{eq:persistent_new_regime_condition}
+\min_{j\in\mathcal L_t}
+\norm{\widehat{\bm\psi}^{(b)}-
+\widehat{\bm\theta}^{(j)}(t)}_{\infty}
+>
+r_{\mathrm{sh}}
+\end{equation}
+for $q_{\mathrm{new}}$ consecutive diagnostic blocks. The new regime is initialized with the average of the candidate shape observations.
+
+\subsection{Library consolidation}
+\label{subsec:library_consolidation}
+
+After diagnostic updates, the algorithm performs a merge check. Two stored regimes $i$ and $j$ are merged if their shape confidence sets overlap. A simple sufficient rule is
+\begin{equation}
+\label{eq:simple_merge_rule}
+\norm{\widehat{\bm\theta}^{(i)}(t)-
+\widehat{\bm\theta}^{(j)}(t)}_{\infty}
+\leq r_{\mathrm{merge}}.
+\end{equation}
+A confidence-aware rule is
+\begin{equation}
+\label{eq:confidence_merge_rule}
+\max_{k\in\A}
+\pos{
+\abs{\widehat\theta_{i,k}(t)-\widehat\theta_{j,k}(t)}
+-
+B_{i,k}^{\mathrm{sh}}(t)
+-
+B_{j,k}^{\mathrm{sh}}(t)
+}
+=0.
+\end{equation}
+When two regimes are merged, their shape observations and counts are pooled. The current regime label is updated accordingly. The merge step prevents one physical regime from being shattered into several short-lived labels.
+
+\begin{algorithm}[t]
+\caption{Level-Invariant Transition-Aware Recurrent UCB (LI-TAR-UCB)}
+\label{alg:li_tar_ucb}
+\begin{algorithmic}[1]
+\Require Number of arms $K$; noise scale $\sigma$; confidence level $\delta$; detector parameters $\nu,h$; transition parameters $m_{\mathrm{batch}},r_{\mathrm{stab}},q_{\mathrm{stab}},d_{\mathrm{exit}},r_{\mathrm{coll}}$; diagnostic parameters $m_{\mathrm{cls}},r_{\mathrm{sh}},q_{\mathrm{new}}$; merge threshold $r_{\mathrm{merge}}$; initialization size $m_0$.
+\State Sample each arm $m_0$ times and compute $\widehat{\bm v}^{(0)}$.
+\State Store $\phi(\widehat{\bm v}^{(0)})$ as the first regime shape.
+\State Set $J\gets 1$, $\widehat Z\gets 1$, $G\gets 0$, and mode $\gets\textsc{Stable}$.
+\For{$t=1,2,\ldots,T$}
+    \If{mode $=\textsc{Stable}$}
+        \State Let $j\gets\widehat Z$.
+        \State Select $A_t\in\argmax_{k\in\A}\{\widehat\theta_{j,k}+B_{j,k}^{\mathrm{sh}}\}$.
+        \State Observe $Y_t$.
+        \State Estimate current level $\widehat\ell_t$ from recent stable residuals.
+        \State Compute $R_t\gets\pos{\widehat\ell_t+\widehat\theta_{j,A_t}-B_{j,A_t}^{\mathrm{sh}}-Y_t}$.
+        \State Update $G\gets\max\{0,G+R_t-\nu\}$.
+        \If{$G\geq h$}
+            \State Store $j_{\mathrm{pre}}\gets j$ and $\widehat\ell_{\mathrm{pre}}\gets\widehat\ell_t$.
+            \State Set mode $\gets\textsc{Transition}$ and reset $G\gets0$.
+            \State Do not add the alarm-triggering reward to any regime estimate.
+        \Else
+            \State Update the level tracker; update the shape library only through completed balanced blocks.
+        \EndIf
+    \ElsIf{mode $=\textsc{Transition}$}
+        \State Sample arms in round-robin batches.
+        \State After each complete batch $b$, compute $\widehat{\bm v}^{(b)}$ and $\widehat{\bm\psi}^{(b)}=\phi(\widehat{\bm v}^{(b)})$.
+        \State Compute $H_b=\norm{\widehat{\bm v}^{(b)}-\widehat{\bm v}^{(b-1)}}_{\infty}$.
+        \State Compute the estimated common drop $\widehat d^{(b)}$ relative to the pre-transition prediction.
+        \If{$H_b\leq r_{\mathrm{stab}}$ and the batch is not collapsed for $q_{\mathrm{stab}}$ consecutive batches}
+            \State Set mode $\gets\textsc{Diagnostic}$.
+        \EndIf
+    \ElsIf{mode $=\textsc{Diagnostic}$}
+        \State Sample each arm $m_{\mathrm{cls}}$ times and compute $\widehat{\bm\psi}=\phi(\widehat{\bm v})$.
+        \State Compute $D_j^{\mathrm{sh}}=\norm{\widehat{\bm\psi}-\widehat{\bm\theta}^{(j)}}_{\infty}$ for all $j=1,\ldots,J$.
+        \State Let $j^\star\in\argmin_j D_j^{\mathrm{sh}}$.
+        \If{$D_{j^\star}^{\mathrm{sh}}\leq r_{\mathrm{sh}}$}
+            \State Set $\widehat Z\gets j^\star$ and update regime $j^\star$ with the diagnostic shape.
+        \ElsIf{condition \eqref{eq:persistent_new_regime_condition} holds for $q_{\mathrm{new}}$ consecutive diagnostic blocks}
+            \State Create a new regime from the candidate diagnostic shapes.
+            \State Set $J\gets J+1$ and $\widehat Z\gets J$.
+        \Else
+            \State Continue diagnostic probing.
+        \EndIf
+        \State Merge stored regimes satisfying \eqref{eq:simple_merge_rule} or \eqref{eq:confidence_merge_rule}.
+        \State Set mode $\gets\textsc{Stable}$ once a regime has been matched or created.
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{Regret criterion}
+\label{sec:regret}
+
+The benchmark is an oracle that knows the active stable shape $Z_t$ and always selects an optimal arm for that shape. At a stable time $t$, the instantaneous regret is
+\begin{equation}
+\label{eq:instantaneous_regret}
+r_t
+=
+\theta_{k^\star(Z_t)}^{(Z_t)}-	heta_{A_t}^{(Z_t)}.
+\end{equation}
+The common level $\ell_t$ cancels from the regret. If $\Sset_T$ denotes the set of stable times up to horizon $T$, the stable-regime regret is
+\begin{equation}
+\label{eq:stable_regret}
+R_T^{\mathrm{stable}}
+=
+\sum_{t\in\Sset_T}
+\left(
+\theta_{k^\star(Z_t)}^{(Z_t)}-	heta_{A_t}^{(Z_t)}
+\right).
+\end{equation}
+Transition periods may be reported separately. If $\Tset_T$ is the set of transition times, write
+\begin{equation}
+\label{eq:regret_decomposition}
+R_T
+=
+R_T^{\mathrm{stable}}+R_T^{\mathrm{transition}}.
+\end{equation}
+The second term depends on the chosen application-specific comparator during non-stationary transition intervals.
+
+\begin{remark}
+If the number of regime episodes grows linearly with $T$, cumulative regret against an oracle that instantly observes every regime switch is generally linear. The meaningful guarantee is controlled regret per episode: after a recurrent shape has been learned, later visits should incur detection, diagnostic, and possibly merge costs, but not a full relearning cost.
+\end{remark}
+
+\section{Assumptions for the analysis}
+\label{sec:assumptions}
+
+The following assumptions give a clean high-probability analysis. They are not minimal, but they isolate the quantities that determine the regret.
+
+\begin{assumption}[Finite recurrent shapes]
+\label{ass:finite_shapes}
+There are $S<\infty$ distinct stable shape vectors $\bm\theta^{(1)},\ldots,\bm\theta^{(S)}\in\R^K$, each satisfying $\one^\top\bm\theta^{(z)}=0$. Stable episodes may revisit the same shape multiple times.
+\end{assumption}
+
+\begin{assumption}[Shape separation]
+\label{ass:shape_separation}
+The stable shapes satisfy
+\begin{equation}
+\label{eq:ass_shape_separation}
+\Delta_{\mathrm{sh}}
+=
+\min_{z\neq z'}
+\norm{\bm\theta^{(z)}-\bm\theta^{(z')}}_{\infty}
+>0.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Local level regularity inside probing blocks]
+\label{ass:level_regular}
+During any balanced probing block used for shape estimation, the common level variation is bounded by $\rho_{\ell}\geq0$:
+\begin{equation}
+\label{eq:level_regular}
+\max_{s,s'\in\mathcal B}
+\abs{\ell_s-\ell_{s'}}
+\leq
+\rho_{\ell}.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Detectable reward collapse]
+\label{ass:detectable_collapse}
+At the beginning of each transition, condition \eqref{eq:drop_condition} holds for at least $\ell_{\mathrm{drop}}$ consecutive observations, with $d_{\min}>0$.
+\end{assumption}
+
+\begin{assumption}[Correct transition exit]
+\label{ass:correct_exit}
+Except on an event of probability at most $\delta$, the transition exit rule \eqref{eq:transition_exit_condition} is satisfied only after the collapsed transition has ended and a stable shape is active.
+\end{assumption}
+
+\begin{assumption}[Long enough stable episodes]
+\label{ass:long_episodes}
+Each stable episode is long enough to complete transition detection, transition exit, diagnostic sampling, and subsequent exploitation.
+\end{assumption}
+
+\section{Proof ingredients}
+\label{sec:proof_ingredients}
+
+\subsection{Concentration of centered block estimates}
+\label{subsec:block_concentration}
+
+\begin{lemma}[Shape concentration]
+\label{lem:shape_concentration}
+Suppose a balanced block $\mathcal B$ is collected during a stable episode of shape $z$, with $m$ samples per arm. Under Assumptions~\ref{ass:subgaussian} and~\ref{ass:level_regular}, there exists a numerical constant $C>0$ such that, with probability at least $1-\delta$,
+\begin{equation}
+\label{eq:shape_concentration}
+\norm{\phi(\widehat{\bm v}_{\mathcal B})-\bm\theta^{(z)}}_{\infty}
+\leq
+C\sigma\sqrt{\frac{\log(K/\delta)}{m}}
++
+\rho_{\ell}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+For each arm, the block mean is an average of $m$ sub-Gaussian observations plus a common level term. The noise component concentrates at order $\sigma\sqrt{\log(K/\delta)/m}$ uniformly over arms. Applying $P$ removes any exactly common level. If the level is not perfectly constant inside the block, the remaining bias is bounded by $\rho_{\ell}$ up to a numerical constant. Combining the coordinate-wise concentration bounds with a union bound gives \eqref{eq:shape_concentration}.
+\end{proof}
+
+\subsection{Correct recurrent-regime matching}
+\label{subsec:matching_proof}
+
+\begin{lemma}[Shape-based classification]
+\label{lem:shape_classification}
+Let the current stable shape be $z$. Suppose the diagnostic phase collects $m_{\mathrm{cls}}$ samples per arm and forms $\widehat{\bm\psi}=\phi(\widehat{\bm v})$. If
+\begin{equation}
+\label{eq:m_cls_requirement}
+m_{\mathrm{cls}}
+\geq
+C
+\frac{\sigma^2}{(\Delta_{\mathrm{sh}}-4\rho_{\ell})^2}
+\log\frac{KT}{\delta},
+\end{equation}
+with $\Delta_{\mathrm{sh}}>4\rho_{\ell}$, then, with probability at least $1-\delta$, nearest-neighbor matching in shape space correctly identifies shape $z$ if it is already in the library. If $z$ is not in the library, the rule does not match it to an existing shape whenever the threshold satisfies
+\begin{equation}
+\label{eq:r_sh_choice}
+\frac{\Delta_{\mathrm{sh}}}{4}
+<
+r_{\mathrm{sh}}
+<
+\frac{3\Delta_{\mathrm{sh}}}{4}.
+\end{equation}
+The inequalities should be interpreted with the additional margin required by the level-variation bias.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+By Lemma~\ref{lem:shape_concentration}, the diagnostic shape is within estimation error of $\bm\theta^{(z)}$. The stored shape estimates satisfy the same type of concentration on the uniform confidence event. If $z$ is in the library, the distance to its stored estimate is at most the sum of two estimation errors. The distance to any other stored shape $z'\neq z$ is at least $\Delta_{\mathrm{sh}}$ minus the same errors. The stated sample size makes the estimation errors smaller than the separation margin, and the threshold in \eqref{eq:r_sh_choice} separates the correct-match and no-match cases.
+\end{proof}
+
+\subsection{Persistent new-regime creation}
+\label{subsec:persistence_proof}
+
+\begin{lemma}[Protection against spurious new regimes]
+\label{lem:no_spurious_new_regimes}
+Assume that a transition batch is a collapsed version of a known shape $j$, in the sense that
+\begin{equation}
+\label{eq:collapsed_known_shape}
+\widehat{\bm v}^{(b)}
+=
+\ell_b\one+
+\bm\theta^{(j)}
+-
+d_b\one+
+\bm\xi_b,
+\end{equation}
+where $d_b\geq d_{\mathrm{exit}}$, and $\norm{\phi(\bm\xi_b)}_{\infty}\leq r_{\mathrm{coll}}/2$. Then, on the shape confidence event, the collapse guard prevents the batch from triggering diagnostic exit or new-regime creation.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Centering \eqref{eq:collapsed_known_shape} removes both $\ell_b\one$ and $d_b\one$, so the batch shape remains close to $\bm\theta^{(j)}$. The level condition detects that the batch is still substantially below the pre-transition level, while the shape condition verifies that the collapsed vector has not become a distinct action-relevant shape. Therefore, the transition-exit rule is not satisfied. Since diagnostic mode is not entered, the collapsed batch cannot be stored as a new regime. If diagnostic mode has already been entered due to noise, the persistence requirement $q_{\mathrm{new}}$ makes the probability of $q_{\mathrm{new}}$ consecutive false new-regime decisions exponentially smaller.
+\end{proof}
+
+\subsection{Library consolidation}
+\label{subsec:merge_proof}
+
+\begin{lemma}[Correctness of confidence-based merging]
+\label{lem:merge_correctness}
+On the uniform shape-confidence event, the confidence merge rule \eqref{eq:confidence_merge_rule} does not merge two genuinely distinct shapes if their separation is larger than twice the relevant confidence radii. Conversely, two labels representing the same true shape are eventually merged once their confidence radii are sufficiently small.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+If labels $i$ and $j$ represent distinct shapes, the triangle inequality gives a lower bound on $\abs{\widehat\theta_{i,k}-\widehat\theta_{j,k}}$ in at least one coordinate, up to the two confidence radii. If the true shapes are separated by more than these radii, the positive part in \eqref{eq:confidence_merge_rule} is nonzero and the labels are not merged. If the two labels represent the same true shape, both estimates concentrate around the same vector. Once the confidence radii dominate the remaining empirical discrepancy, condition \eqref{eq:confidence_merge_rule} holds and the labels are merged.
+\end{proof}
+
+\subsection{Stable-regime learning regret}
+\label{subsec:stable_learning_proof}
+
+\begin{lemma}[Shape-UCB learning cost]
+\label{lem:shape_ucb_regret}
+On the uniform shape-confidence event, if stable episodes are correctly matched to their recurrent shapes, then the regret incurred by selecting suboptimal arms within the stored shapes satisfies
+\begin{equation}
+\label{eq:shape_ucb_regret}
+R_{T,\mathrm{learn}}^{\mathrm{stable}}
+\leq
+C
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_0
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\Delta_k^{(z)},
+\end{equation}
+for numerical constants $C,C_0>0$, up to additional balanced-probing costs explicitly counted in the diagnostic terms.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The proof is the standard UCB argument applied to centered shape estimates. If a suboptimal arm $k$ is selected in shape $z$ while the optimal arm $k^\star(z)$ is available, optimism implies that the upper confidence index of $k$ is at least the true value of the optimal arm. On the confidence event, this can happen only while the confidence radius of $k$ is of order at least $\Delta_k^{(z)}$. Solving the resulting inequality gives $O(\sigma^2\log T/(\Delta_k^{(z)})^2)$ selections of arm $k$, and multiplying by the gap gives \eqref{eq:shape_ucb_regret}.
+\end{proof}
+
+\subsection{Transition detection}
+\label{subsec:detection_proof}
+
+\begin{lemma}[Detection delay]
+\label{lem:detection_delay}
+Suppose the current stable shape is correctly identified and the level tracker is accurate up to error $e_{\ell}$. If a transition produces a common reward drop of at least $d_{\min}$ for $\ell_{\mathrm{drop}}$ observations, and if $e_{\ell}$ and the shape confidence radius are smaller than $d_{\min}/4$, then the detector has positive drift during the transition. With a calibrated threshold $h$, the transition is detected within
+\begin{equation}
+\label{eq:detection_delay}
+D_{\mathrm{det}}
+=
+O\left(
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta}
+\right)
+\end{equation}
+observations with probability at least $1-\delta$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+Before the transition, the lower prediction \eqref{eq:lower_prediction} is below the true stable mean by only the confidence and level-tracking errors. During the transition, the conditional mean is lower by at least $d_{\min}$. Hence the residual $R_t$ in \eqref{eq:drop_residual} has positive expectation of order $d_{\min}$. After subtracting the tolerance $\nu$, the CUSUM statistic has positive drift. A concentration bound for sub-Gaussian martingale differences then yields the stated crossing time for an appropriate threshold.
+\end{proof}
+
+\section{Main regret statement}
+\label{sec:main_regret}
+
+Let $G_T$ be the number of stable-regime episodes up to horizon $T$. Let $D_{\mathrm{det}}$ be a high-probability detection-delay bound. Let $D_{\mathrm{stab}}$ be a high-probability upper bound on the number of transition-mode observations needed before the stable-and-not-collapsed exit condition is satisfied. Let $D_{\mathrm{new}}$ denote the additional diagnostic cost caused by the persistent new-regime requirement when the post-transition shape has not been seen before.
+
+\begin{theorem}[Regret decomposition for LI-TAR-UCB]
+\label{thm:main_regret}
+Under Assumptions~\ref{ass:subgaussian}--\ref{ass:long_episodes}, choose the shape confidence radii as in \eqref{eq:shape_confidence_radius}, choose $m_{\mathrm{cls}}$ satisfying \eqref{eq:m_cls_requirement}, and choose the detector and merge thresholds so that Lemmas~\ref{lem:no_spurious_new_regimes}--\ref{lem:detection_delay} hold. Then, with probability at least $1-c\delta$ for a numerical constant $c>0$,
+\begin{align}
+\label{eq:main_regret_bound}
+R_T^{\mathrm{stable}}
+&\leq
+C_1
+\sum_{z=1}^{S}
+\sum_{k:\Delta_k^{(z)}>0}
+\frac{\sigma^2\log T}{\Delta_k^{(z)}}
++
+C_2\Delta_{\max}G_TD_{\mathrm{det}}
+\nonumber\\
+&\quad+
+C_3\Delta_{\max}G_TD_{\mathrm{stab}}
++
+C_4\Delta_{\max}G_TK m_{\mathrm{cls}}
++
+C_5\Delta_{\max}D_{\mathrm{new}}.
+\end{align}
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The regret is decomposed into five terms. First, after a stable shape has been correctly matched, arm choices are governed by shape-UCB. Lemma~\ref{lem:shape_ucb_regret} gives the recurrent-shape learning cost, which scales with the number of distinct shapes $S$, not with the number of episodes $G_T$. Second, after a transition begins, the algorithm may continue using the old stable shape until the drop detector fires. Lemma~\ref{lem:detection_delay} bounds this delay by $D_{\mathrm{det}}$, and each such round costs at most $\Delta_{\max}$. Third, transition mode lasts until the reward vector is both stable and not collapsed; this contributes at most $\Delta_{\max}G_TD_{\mathrm{stab}}$ if those rounds are included in stable regret, or is reported separately as transition cost otherwise. Fourth, diagnostic mode samples each arm $m_{\mathrm{cls}}$ times, giving at most $\Delta_{\max}G_TK m_{\mathrm{cls}}$. Lemma~\ref{lem:shape_classification} ensures that the resulting shape is correctly matched to the library whenever it has been seen before. Fifth, the persistent new-regime rule may require additional diagnostic blocks before a truly new shape is stored; this cost is represented by $D_{\mathrm{new}}$. A union bound over the confidence, detection, classification, collapse-guard, and merge events gives the theorem.
+\end{proof}
+
+\begin{remark}[Effect of level invariance]
+The classification term depends on the shape separation $\Delta_{\mathrm{sh}}$ rather than on the absolute vector separation. This is the central difference from the original TAR-UCB analysis. If the same physical regime reappears at different levels but with the same shape, LI-TAR-UCB can still match it to the same library element.
+\end{remark}
+
+\section{Parameter summary}
+\label{sec:parameters}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Meaning \\
+\midrule
+$\sigma$ & sub-Gaussian noise scale \\
+$\delta$ & target failure probability \\
+$m_0$ & initial samples per arm \\
+$m_{\mathrm{blk}}$ & samples per arm in a balanced shape-estimation block \\
+$\nu$ & tolerance in the one-sided transition detector \\
+$h$ & threshold for declaring a transition \\
+$m_{\mathrm{batch}}$ & samples per arm in one transition batch \\
+$r_{\mathrm{stab}}$ & stability threshold for consecutive transition batches \\
+$q_{\mathrm{stab}}$ & number of stable and non-collapsed batches required to exit transition mode \\
+$d_{\mathrm{exit}}$ & minimum remaining common drop interpreted as collapse \\
+$r_{\mathrm{coll}}$ & shape tolerance for the collapse guard \\
+$m_{\mathrm{cls}}$ & diagnostic samples per arm \\
+$r_{\mathrm{sh}}$ & shape-space matching threshold \\
+$q_{\mathrm{new}}$ & consecutive non-matching diagnostics needed to create a new regime \\
+$r_{\mathrm{merge}}$ & threshold for merging duplicate regime labels \\
+\bottomrule
+\end{tabular}
+\caption{Main parameters of LI-TAR-UCB.}
+\label{tab:parameters}
+\end{table}
+
+The diagnostic sample size should scale as
+\begin{equation}
+\label{eq:practical_m_cls}
+m_{\mathrm{cls}}
+\asymp
+\frac{\sigma^2}{(\Delta_{\mathrm{sh}}-4\rho_{\ell})^2}
+\log\frac{KT}{\delta}.
+\end{equation}
+The transition detection delay scales as
+\begin{equation}
+\label{eq:practical_d_det}
+D_{\mathrm{det}}
+\asymp
+\frac{\sigma^2}{d_{\min}^2}
+\log\frac{T}{\delta}.
+\end{equation}
+The shape threshold $r_{\mathrm{sh}}$ should be larger than the diagnostic estimation error but smaller than the separation between distinct shapes. The merge threshold should be chosen conservatively so that duplicate labels are consolidated without merging genuinely distinct shapes.
+
+\section{Discussion}
+\label{sec:discussion}
+
+LI-TAR-UCB modifies the original TAR-UCB representation while preserving its autonomous, reward-only structure. The regime library no longer compares absolute reward vectors. It compares centered shape vectors, so a common drift in the reward level does not create artificial new regimes. The algorithm also avoids immediate new-regime creation: a new label is introduced only after persistent evidence that the current shape is stable, non-collapsed, and far from all stored shapes. Finally, a merge step consolidates library labels whose shape confidence sets overlap.
+
+The resulting method is appropriate when the action-relevant information is the relative reward profile across arms, while the absolute level is a nuisance variable. The regret analysis is correspondingly stated in shape space. The stable learning term depends on the arm gaps within each recurrent shape, while the classification term depends on the shape separation $\Delta_{\mathrm{sh}}$. Transition costs remain episode-dependent because frequent hidden transitions cannot be eliminated by a context-free reward-only learner.
+
+\end{document}

@@ -1,0 +1,107 @@
+================================================================================
+TAR-UCB: known issues in the current version (Lightsaber online-controller-selection)
+Diagnosed on the 1-week / 3-day validation caches (realistic 1-day diurnal period).
+Context-free reward-only TAR-UCB; algorithm kept UNMODIFIED (guarantees preserved).
+================================================================================
+
+SUMMARY
+-------
+TAR-UCB is still the best AUTONOMOUS, CONTEXT-FREE policy (1-week regret 562 vs 777
+for the best fixed controller, 805 Thompson, 1230 D-UCB; only the Oracle and the
+forecast-driven Rule-based do better, and they use side context). BUT its core
+mechanism -- recognising a RECURRING regime and reusing what it learned -- does not
+work well here. It largely re-learns each visit instead of recalling. The wins come
+from adaptation + partial credit, not from clean regime identification.
+
+
+ISSUE 1 -- Recurrence reuse is broken (the headline problem)
+-----------------------------------------------------------
+Evidence (1-week, per ~4h diurnal visit, arm-accuracy):
+    R0->C0 visits: first-5-decisions 0.31, early-third 0.53, late-third 0.67
+    R2->C2 visits: first-5-decisions 0.19, early-third 0.32, late-third 0.43
+If reuse worked the first decisions of each visit would already be high (recall the
+answer). Instead accuracy starts near-random each visit and re-climbs -> it re-learns
+every diurnal cycle. Library size grows (J = 5 @3d, 12-14 @1wk vs true 3) and each
+true regime is SHATTERED into several short-lived labels rather than consolidated.
+
+
+ISSUE 2 -- Regime fingerprint conflates LEVEL and SHAPE
+-------------------------------------------------------
+TAR-UCB classifies a regime by the sup-norm distance between mean REWARD VECTORS.
+That distance mixes (a) overall reward LEVEL and (b) the SHAPE = which arm is best.
+The environment drifts continuously, so the SAME physical regime sampled at different
+drift phases lands at different absolute levels and is filed as different regimes.
+Example library entries that are all really "R0" (C0-best) or "R2" (C1/C2-best):
+    regime 0 = [0.77, 0.73, 0.73]   (R0, high level)
+    regime 7 = [0.56, 0.24, 0.17]   (R0 shape, low level)   -> filed separately
+    regime 2 = [0.57, 0.69, 0.54] and regime 5 = [0.58, 0.61, 0.57]  (R2 duplicates)
+Only the SHAPE matters for the optimal action; the level does not. A level-sensitive
+distance is the wrong feature for this problem.
+
+
+ISSUE 3 -- Strong, unintended sensitivity to the reward normalisation
+---------------------------------------------------------------------
+Because of Issue 2, TAR-UCB's regime ID depends heavily on how the reward is shaped.
+Controlled same-cache study (TAR-UCB library J / arm-accuracy):
+    logistic (saturating)        J=5   acc=0.47   <- current default (best)
+    min-max, steady floor        J=5   acc=0.32
+    min-max, dynamic floor       J=8   acc=0.23
+The logistic SATURATES transition/spike level-swings, so the settled-regime shape
+dominates classification. A linear min-max SPREADS those swings so level dominates ->
+more fragmentation. This is why we use the logistic; but relying on reward shaping to
+mask a feature problem is fragile.
+
+
+ISSUE 4 -- Reward clipping creates spurious "zero" regimes (map-dependent)
+-------------------------------------------------------------------------
+With a HARD-clipped reward (linear min-max), ~10% of decisions during transitions/
+spikes clip to exactly 0. A flat-at-zero transient looks "settled" to the stability
+test, so TAR-UCB diagnoses a [0,0,0] fingerprint and mints a spurious regime at every
+transition. The logistic (smooth saturation, no hard clip) avoids this, and lowering a
+min-max floor below the true dynamic minimum also avoids it -- but it is a latent trap
+for any clipped reward.
+
+
+ISSUE 5 -- Model mismatch: discrete regimes vs adiabatic continuum
+------------------------------------------------------------------
+TAR-UCB assumes a small set of stable regimes with brief transitions. Here the
+environment drifts continuously (diurnal ramps, micro-seism spikes), so there is no
+crisp regime to classify at each instant. Attempts to force a clean 3-regime library
+by tightening the change-detection / classification gates made things WORSE: the
+policy spent far more time round-robin exploring (switches 4k -> 16k) and regret rose.
+So the mismatch cannot be tuned away with the existing gates.
+
+
+ISSUE 6 -- Near-degenerate regimes cap what reward-only ID can achieve
+---------------------------------------------------------------------
+In reward space R0 and R2 are only ~0.13 apart while per-decision noise is ~0.08, and
+in R2 the top two arms (C1, C2) differ by ~0.005 (statistically identical); R1's three
+arms are within ~0.03. So:
+  - distinguishing R0 from R2 from reward alone is barely above noise;
+  - "arm-accuracy" understates performance (confusing C1/C2 in R2, or any arm in R1,
+    costs almost nothing) -- regret is the honest metric;
+  - even a perfect classifier has a low ceiling; the achievable advantage of any
+    selection policy over a fixed controller is modest and accrues only over long
+    horizons with many recurrences.
+
+
+WHAT IS NOT THE PROBLEM
+-----------------------
+- Not exploration/exploitation tuning: sweeps over forgetting/detection thresholds did
+  not help (mostly hurt).
+- Not the simulator or the streaming: the streamed closed loop is bit-identical to a
+  single-shot kernel run (max|delta| = 0).
+- Not library SIZE per se: J>3 is a symptom, not the cost driver; forcing J->3 hurt.
+
+
+POSSIBLE DIRECTIONS (NOT YET IMPLEMENTED; all beyond the current unmodified algorithm)
+-------------------------------------------------------------------------------------
+- Level-invariant / shape-based regime feature (e.g. classify on the centered reward
+  vector or the arm ranking) so a returning regime matches regardless of level drift.
+  Addresses Issues 1-3 directly; changes the algorithm (guarantees to be re-checked).
+- Library consolidation (merge near-duplicate regimes) to counter fragmentation.
+- Provide a context / forecast side-signal for regime ID (makes it contextual;
+  Rule-based/contextual already approach the Oracle) -- changes the method framing.
+- Make the benchmark regimes more separable (widen R0-R2 gap; break the R2 C1~C2 tie)
+  so context-free recurrence is actually learnable -- changes the problem definition.
+================================================================================

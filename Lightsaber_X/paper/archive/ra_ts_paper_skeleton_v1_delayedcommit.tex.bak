@@ -1,0 +1,661 @@
+\documentclass[11pt]{article}
+
+% -----------------------------------------------------------------------------
+% Packages
+% -----------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{microtype}
+
+% -----------------------------------------------------------------------------
+% Theorem environments
+% -----------------------------------------------------------------------------
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+
+% -----------------------------------------------------------------------------
+% Macros
+% -----------------------------------------------------------------------------
+\newcommand{\Acal}{\mathcal A}
+\newcommand{\Fcal}{\mathcal F}
+\newcommand{\Lcal}{\mathcal L}
+\newcommand{\Qcal}{\mathcal Q}
+\newcommand{\Rcal}{\mathcal R}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pbb}{\mathbb P}
+\newcommand{\one}{\mathbf 1}
+\newcommand{\Reg}{\mathrm{Reg}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\phic}{\varphi}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO:} #1\textbf{]}}}
+\newcommand{\proofguide}[1]{\par\smallskip\noindent\textcolor{blue!65!black}{\textbf{Proof guide.} #1}\par\smallskip}
+\newcommand{\citationrole}[1]{\par\smallskip\noindent\textcolor{purple!70!black}{\textbf{Citation role.} #1}\par\smallskip}
+
+% -----------------------------------------------------------------------------
+% Title
+% -----------------------------------------------------------------------------
+\title{Recurrence-Aware Thompson Sampling for Piecewise-Stationary Bandits with Recurring Regimes\\
+\large A Paper Skeleton with Theorem and Proof Roadmap}
+\author{Author names omitted for draft}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This draft gives a complete skeleton for a paper on Recurrence-Aware Thompson Sampling (RA-TS), an algorithm for stochastic multi-armed bandits in which the environment is piecewise stationary but the same latent regimes may recur. The algorithm combines three mechanisms: a short coverage probe for regime identification, a memory of previously encountered regimes represented by sufficient statistics, and Thompson sampling with a change detector during tracking. The central theoretical claim is not bounded total regret, which is impossible over an unbounded horizon even in stationary bandits, but a recurrence-aware regret decomposition: the learning cost is logarithmic in the cumulative lifetime of each distinct regime, while the non-stationary overhead is linear in the number of regime episodes. The proof should be organized modularly by combining adaptive concentration, correct regime matching, detector validity, library purity, and stationary Thompson-sampling regret.
+\end{abstract}
+
+\paragraph{How to read this draft.}
+The text below is written as a manuscript skeleton. Sections marked with \todo{} indicate places where implementation details, constants, experiments, or model variants must be finalized. The blue \emph{Proof guide} paragraphs explain how each theorem should be proved. The purple \emph{Citation role} paragraphs explain which existing proof template should be cited and why.
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+Classical stochastic bandit algorithms assume that each arm has a fixed reward distribution. In many online decision problems this assumption is too restrictive: the reward model may change abruptly, yet not arbitrarily. A useful intermediate model is a piecewise-stationary bandit in which time is partitioned into episodes, and the reward distribution remains fixed inside each episode. Existing methods for this setting usually detect changes and then restart or discount old data. Restarting is appropriate when every new episode is unrelated to the past, but it wastes information when the same regimes recur.
+
+This paper studies stochastic bandits with recurring regimes. At each time, the learner observes only the reward of the selected arm. The active regime is hidden, may change at unknown times, and may later reappear. The objective is to exploit the recurrence structure: once a regime has been learned, subsequent visits should not require learning it again from scratch.
+
+We propose Recurrence-Aware Thompson Sampling (RA-TS). After a detected change, RA-TS performs a short coverage probe that samples each arm enough times to estimate the \emph{shape} of the active regime. The shape is the centered vector of arm means, so it is invariant to additive level shifts that affect all arms equally. The estimated shape is compared with a library of previously encountered regimes. If a match is found, the algorithm resumes the corresponding posterior; otherwise it creates a new library entry. During normal operation, RA-TS uses Thompson sampling and monitors the selected arm with a change detector. To obtain a clean proof, we use a delayed-commit queue: observations collected immediately before an alarm are not permanently added to the old regime's library entry.
+
+\paragraph{Contributions.}
+A final paper should state the contributions conservatively:
+\begin{enumerate}[leftmargin=*]
+    \item We formulate a recurring-regime piecewise-stationary bandit model with level-invariant regime identification.
+    \item We introduce RA-TS, a simple algorithm combining coverage probing, shape matching, Thompson sampling, change detection, and delayed commit.
+    \item We prove a recurrence-aware regret decomposition. The learning term is logarithmic in the cumulative lifetime of each distinct regime, while the switching overhead scales with the number of episodes.
+    \item We derive an anytime version with vanishing average regret whenever the number of regime episodes grows slowly enough.
+\end{enumerate}
+
+\citationrole{The introduction should position the paper at the intersection of stationary Thompson sampling \citep{AgrawalGoyal2013,KaufmannKordaMunos2012}, switching/non-stationary bandits \citep{GarivierMoulines2011}, change-detection bandits \citep{LiuLeeShroff2018,BessonKaufmannMaillardSeznec2022}, and recurring/latent bandit models \citep{SaberEtAl2021,MaillardMannor2014}. The novelty claim should be the combination of recurrence-aware memory with explicit online detection and level-invariant shape matching, not the individual components.}
+
+% =============================================================================
+\section{Related Work}
+% =============================================================================
+
+\paragraph{Stationary stochastic bandits and Thompson sampling.}
+For a single stationary bandit instance, Thompson sampling enjoys logarithmic gap-dependent regret bounds and near-optimal problem-independent bounds. These results are the building block for the Track phase of RA-TS. Once the proof establishes that a library entry contains only clean observations from one true regime, the Track phase can be analyzed by importing a stationary Thompson-sampling theorem.
+
+\citationrole{Use \citet{AgrawalGoyal2013} for finite-time Thompson-sampling regret bounds. If the reward model is Bernoulli, \citet{KaufmannKordaMunos2012} gives an asymptotically optimal finite-time analysis. If the paper keeps Gaussian rewards, cite a Thompson-sampling bound valid for sub-Gaussian or Gaussian rewards; otherwise state the stationary bound as a proposition with the precise assumptions needed.}
+
+\paragraph{Piecewise-stationary and switching bandits.}
+Non-stationary bandit algorithms often handle changes by discounting, sliding windows, or restarts. \citet{GarivierMoulines2011} prove regret bounds for discounted and sliding-window UCB by decomposing time into intervals close to and far from breakpoints. This decomposition is structurally similar to the RA-TS proof: clean Track rounds are treated as stationary, while detection and identification rounds are charged as switching overhead.
+
+\citationrole{Use \citet{GarivierMoulines2011} as the reference for the high-level decomposition: stationary regret away from changes plus overhead near change points. This is the proof philosophy behind the RA-TS decomposition.}
+
+\paragraph{Change-detection bandits.}
+A second line of work combines bandit algorithms with explicit change-point detectors. \citet{LiuLeeShroff2018} study CD-UCB policies, including CUSUM-UCB and Page-Hinkley-UCB, where detected changes trigger restarts. \citet{BessonKaufmannMaillardSeznec2022} combine klUCB with a GLR change-point detector and prove detector guarantees that are then inserted into the regret analysis.
+
+\citationrole{Use \citet{LiuLeeShroff2018} for the CUSUM-style proof architecture: forced exploration or sufficient sampling, false-alarm control, detection-delay control, and regret decomposition. Use \citet{BessonKaufmannMaillardSeznec2022} as the reference for a fully rigorous detector theorem. If this paper does not derive a new CUSUM theorem, the detector-validity event should be stated as an assumption and justified by analogy with these works.}
+
+\paragraph{Recurring and latent bandits.}
+Routine Bandits study settings where a learner repeatedly faces one of several recurring bandit instances and can benefit from reusing previous observations. Latent Bandits study bandits whose reward distributions are indexed by hidden types. These works motivate the library mechanism in RA-TS, but RA-TS differs because regime switches occur online at unknown times and must be detected from the reward stream.
+
+\citationrole{Use \citet{SaberEtAl2021} for the recurrence-memory idea: learning should be amortized over distinct recurring instances rather than paid at every visit. Use \citet{MaillardMannor2014} to situate the method among latent-type bandit models.}
+
+\paragraph{Thompson sampling in switching environments.}
+\citet{MellorShapiro2013} combine Thompson sampling with Bayesian online change-point detection in switching environments. Their work is an important ancestor for the idea of using Thompson sampling in a non-stationary setting, but RA-TS differs by explicitly storing and matching recurring regimes rather than only adapting to changes.
+
+% =============================================================================
+\section{Problem Formulation}
+% =============================================================================
+
+Let \(\Acal=\{1,\ldots,K\}\) be the set of arms. At each round \(t\geq 1\), the learner selects an arm \(A_t\in\Acal\) and observes a reward
+\begin{equation}
+    Y_t = \mu_{z_t,A_t}+\varepsilon_t,
+    \label{eq:reward_model}
+\end{equation}
+where \(z_t\in\Rcal\) is the active hidden regime and \(\Rcal\) is a finite set of distinct regimes. The noise sequence is adapted to a filtration \((\Fcal_t)_{t\geq0}\) and satisfies
+\begin{equation}
+    \E[\varepsilon_t\mid \Fcal_{t-1}]=0,
+    \qquad
+    \E[\exp(\lambda\varepsilon_t)\mid \Fcal_{t-1}]
+    \leq \exp\left(\frac{\lambda^2\sigma^2}{2}\right)
+    \quad \forall \lambda\in\mathbb R .
+    \label{eq:subgaussian_noise}
+\end{equation}
+The arm \(A_t\) is \(\Fcal_{t-1}\)-measurable.
+
+Time is partitioned into episodes \(j=1,2,\ldots,G_T\) on any finite horizon \(T\). Episode \(j\) occupies the interval \([\tau_j,\tau_{j+1})\), with \(\tau_1=1\), and has active regime \(r_j\in\Rcal\), so that \(z_t=r_j\) for \(t\in[\tau_j,\tau_{j+1})\). The same regime may appear in several non-consecutive episodes.
+
+\subsection{Level and Shape}
+
+For each regime \(r\), write
+\begin{equation}
+    \mu_{r,k}=\ell_r+\theta_{r,k},
+    \qquad
+    \sum_{k=1}^K \theta_{r,k}=0.
+    \label{eq:level_shape_decomposition}
+\end{equation}
+The scalar \(\ell_r\) is an additive level and \(\theta_r\in\mathbb R^K\) is the centered shape. Define the centering operator
+\begin{equation}
+    \phic(v)
+    =v-\frac{1}{K}\left(\sum_{k=1}^K v_k\right)\one .
+    \label{eq:centering_operator}
+\end{equation}
+Then \(\phic(\mu_r)=\theta_r\). The optimal arm in regime \(r\) is
+\begin{equation}
+    k^\star(r)\in\argmax_{k\in\Acal}\mu_{r,k}
+    =\argmax_{k\in\Acal}\theta_{r,k}.
+\end{equation}
+For a suboptimal arm \(k\neq k^\star(r)\), define
+\begin{equation}
+    \Delta_{r,k}=\mu_{r,k^\star(r)}-\mu_{r,k}>0,
+    \qquad
+    \Delta_{\max}=\sup_{r,k,k'}|\mu_{r,k}-\mu_{r,k'}|.
+\end{equation}
+
+\begin{assumption}[Shape separation]
+\label{ass:shape_separation}
+There exists \(\Delta_{\mathrm{sh}}>0\) such that, for all distinct \(r,r'\in\Rcal\),
+\begin{equation}
+    \|\theta_r-\theta_{r'}\|_\infty\geq \Delta_{\mathrm{sh}}.
+\end{equation}
+\end{assumption}
+
+\begin{assumption}[Minimum dwell time]
+\label{ass:dwell_time}
+There exists \(m_{\min}\) such that every episode has length at least
+\begin{equation}
+    m_{\min}\geq n_0K+d+q.
+\end{equation}
+Here \(n_0K\) is the maximum length of the coverage probe, \(d\) is the detector delay bound, and \(q\) is the delayed-commit length.
+\end{assumption}
+
+\proofguide{The minimum dwell-time assumption is the cleanest first theorem. Without it, a change can occur during Acquire, creating a mixed probe. Mixed probes require additional bookkeeping and a separate robustification step. The first rigorous paper version should avoid this complication.}
+
+\begin{assumption}[Visible changes]
+\label{ass:visible_changes}
+Whenever a true regime change occurs during Track mode, the detector receives enough signal to raise an alarm within at most \(d\) rounds on the detector-validity event defined below.
+\end{assumption}
+
+\proofguide{This assumption should later be replaced by explicit conditions on the CUSUM statistic. At the skeleton stage, it is better to isolate detector validity rather than hide it inside an informal proof.}
+
+% =============================================================================
+\section{The RA-TS Algorithm}
+% =============================================================================
+
+RA-TS maintains a library \(\Lcal\) of discovered regimes. A library entry \(g\in\Lcal\) stores counts and reward sums
+\begin{equation}
+    N_{g,k},\qquad S_{g,k},\qquad k\in\Acal.
+\end{equation}
+Whenever \(N_{g,k}>0\) for all \(k\), define
+\begin{equation}
+    \widehat\mu_{g,k}=\frac{S_{g,k}}{N_{g,k}},
+    \qquad
+    \widehat\theta_g=\phic(\widehat\mu_g).
+\end{equation}
+The algorithm has two modes.
+
+\subsection{Acquire Mode}
+
+After initialization or after an alarm, RA-TS enters Acquire mode. It collects a balanced probe by sampling each arm until every arm has been observed \(n_0\) times. Let \(n_k=n_0\) and \(s_k\) be the probe count and sum for arm \(k\). The probe mean and centered probe shape are
+\begin{equation}
+    \widehat\psi_k=\frac{s_k}{n_0},
+    \qquad
+    \widehat\xi=\phic(\widehat\psi).
+\end{equation}
+The algorithm computes
+\begin{equation}
+    D_g=\|\widehat\xi-\widehat\theta_g\|_\infty,
+    \qquad
+    g^\star\in\argmin_{g\in\Lcal}D_g.
+\end{equation}
+If \(\Lcal\neq\emptyset\) and \(D_{g^\star}\leq\tau_{\mathrm{match}}\), the probe is assigned to entry \(g^\star\). Otherwise, a new library entry is created. The full clean probe is then committed to the assigned entry.
+
+\subsection{Track Mode}
+
+Once a regime entry \(g\) is active, RA-TS uses Thompson sampling with Gaussian posterior parameters
+\begin{equation}
+    v_{g,k}=\left(\tau_0^{-2}+\frac{N_{g,k}}{\sigma^2}\right)^{-1},
+    \qquad
+    m_{g,k}=v_{g,k}\left(\frac{\mu_0}{\tau_0^2}+\frac{S_{g,k}}{\sigma^2}\right).
+\end{equation}
+At each Track round, it samples
+\begin{equation}
+    \widetilde\mu_{g,k}\sim\mathcal N(m_{g,k},v_{g,k}),
+    \qquad
+    A_t\in\argmax_{k\in\Acal}\widetilde\mu_{g,k}.
+\end{equation}
+The detector uses a frozen baseline \(b_g\), initialized when Track begins. After observing \(Y_t\), define
+\begin{equation}
+    e_t=Y_t-b_{g,A_t}.
+\end{equation}
+The played-arm CUSUM statistic is updated by
+\begin{equation}
+    G_{A_t}\leftarrow \max\{0,\,G_{A_t}+|e_t|-\nu\}.
+\end{equation}
+An alarm is raised if \(G_{A_t}\geq h\).
+
+\paragraph{Delayed commit.}
+Track observations are first placed in a queue \(\Qcal\). An observation is permanently committed to \((N_g,S_g)\) only after it has remained in the queue for \(q\) rounds without an alarm. If an alarm is raised, the queue is discarded and RA-TS returns to Acquire mode.
+
+\proofguide{Delayed commit is a proof device that prevents samples generated after a hidden regime switch but before detection from contaminating the previous library entry. It is not a detector modification: the detector still observes every reward immediately. In the proof, choose \(q\geq d\).}
+
+\subsection{Algorithm Block}
+
+\begin{center}
+\fbox{\begin{minipage}{0.94\linewidth}
+\textbf{RA-TS with delayed commit.}
+\begin{enumerate}[leftmargin=*]
+    \item Initialize \(\Lcal=\emptyset\), mode = Acquire, empty probe buffer.
+    \item \textbf{Acquire:} sample the least-sampled arm until every arm has \(n_0\) probe samples.
+    \item Compute the centered probe shape and match it to the nearest library shape. If the distance is at most \(\tau_{\mathrm{match}}\), assign the probe to that library entry; otherwise create a new entry.
+    \item Commit the probe to the assigned entry. Initialize the Track baseline and detector statistics.
+    \item \textbf{Track:} play arms by Thompson sampling from the active entry. Update the detector immediately. Store rewards in the delayed-commit queue.
+    \item Commit only observations that have remained in the queue for \(q\) rounds. If the detector raises an alarm, discard the queue and return to Acquire.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+% =============================================================================
+\section{Main Finite-Horizon Guarantee}
+% =============================================================================
+
+The regret against an oracle that knows the active regime is
+\begin{equation}
+    \Reg_T
+    =\sum_{t=1}^T\left(\mu_{z_t,k^\star(z_t)}-\mu_{z_t,A_t}\right).
+\end{equation}
+Let
+\begin{equation}
+    T_r(T)=\sum_{t=1}^T\one\{z_t=r\}
+\end{equation}
+be the cumulative lifetime of regime \(r\) up to time \(T\).
+
+\begin{assumption}[Detector-validity event]
+\label{ass:detector_event}
+For the chosen detector parameters \((\nu,h)\), there exists an event \(\mathcal E_{\mathrm{det}}(T)\) satisfying
+\begin{equation}
+    \Pbb\bigl(\mathcal E_{\mathrm{det}}(T)^c\bigr)
+    \leq \delta_{\mathrm{det}},
+\end{equation}
+under which no false alarm occurs and every visible change occurring during Track mode is detected within at most \(d\) rounds.
+\end{assumption}
+
+\citationrole{This assumption should be justified using the proof architecture of CUSUM-UCB in \citet{LiuLeeShroff2018}. If a complete detector theorem is desired, model the detector proof more closely on the GLR analysis of \citet{BessonKaufmannMaillardSeznec2022}: prove a false-alarm bound and a detection-delay bound, then insert them into the regret theorem.}
+
+\begin{assumption}[Stationary Thompson-sampling bound]
+\label{ass:stationary_TS}
+For every stationary Gaussian or sub-Gaussian bandit instance with gaps \((\Delta_k)_{k\neq k^\star}\), Thompson sampling satisfies
+\begin{equation}
+    \E[\Reg_n^{\mathrm{TS}}]
+    \leq
+    C_{\mathrm{TS}}
+    \sum_{k\neq k^\star}
+    \frac{\sigma^2\log(n\vee 2)}{\Delta_k}
+    +C'_{\mathrm{TS}}
+    \sum_{k\neq k^\star}\Delta_k .
+    \label{eq:stationary_TS_bound}
+\end{equation}
+\end{assumption}
+
+\citationrole{This assumption imports the stationary TS theorem. Cite \citet{AgrawalGoyal2013} for finite-time TS regret. If the reward family is Bernoulli, \citet{KaufmannKordaMunos2012} is the sharp asymptotic reference. The paper must ensure that the stated version matches the reward family used in the RA-TS model.}
+
+\begin{theorem}[Finite-horizon recurrence-aware regret]
+\label{thm:finite_horizon_regret}
+Fix a horizon \(T\). Suppose Assumptions \ref{ass:shape_separation}--\ref{ass:stationary_TS} hold. Let \(q\geq d\), and suppose the matching threshold satisfies
+\begin{equation}
+    2c(n_0)\leq \tau_{\mathrm{match}}<\Delta_{\mathrm{sh}}-2c(n_0),
+    \qquad
+    c(n_0)<\frac{\Delta_{\mathrm{sh}}}{4},
+    \label{eq:matching_threshold_condition}
+\end{equation}
+where \(c(n_0)\) is the uniform shape-estimation radius defined in Lemma \ref{lem:adaptive_concentration}. Then
+\begin{align}
+    \E[\Reg_T]
+    &\leq
+    C_{\mathrm{TS}}
+    \sum_{r\in\Rcal}
+    \sum_{k\neq k^\star(r)}
+    \frac{\sigma^2\log(T_r(T)\vee 2)}{\Delta_{r,k}}
+    +C'_{\mathrm{TS}}
+    \sum_{r\in\Rcal}
+    \sum_{k\neq k^\star(r)}\Delta_{r,k}
+    \nonumber\\
+    &\quad
+    +\Delta_{\max}G_T(n_0K+d+q)
+    +\Delta_{\max}T(\delta_{\mathrm{conc}}+\delta_{\mathrm{det}}).
+    \label{eq:finite_horizon_bound}
+\end{align}
+\end{theorem}
+
+\proofguide{The theorem should be proved by the five-stage proof below: adaptive concentration, correct matching, library purity, stationary TS regret on clean Track rounds, and boundary-overhead accounting. The structure mirrors switching-bandit decompositions in \citet{GarivierMoulines2011}, but replaces restart cost with recurrence-aware probe-and-match cost.}
+
+\begin{corollary}[Sublinear regret under sparse switching]
+If \(|\Rcal|\), \(K\), the gaps, and the overhead parameters are fixed, then
+\begin{equation}
+    \E[\Reg_T]
+    =O\bigl(|\Rcal|K\log T+G_T\bigr)
+\end{equation}
+up to problem-dependent constants. Consequently, \(\E[\Reg_T]/T\to0\) whenever \(G_T=o(T)\).
+\end{corollary}
+
+\begin{remark}[The guarantee is not bounded total regret]
+The theorem does not state that total regret is uniformly bounded in \(T\). Such a statement would be false even in a stationary bandit, where the cumulative regret of standard algorithms is typically logarithmic. The meaningful guarantee is that average regret vanishes when the number of regime episodes grows sublinearly and the recurrence library prevents repeated relearning of the same regimes.
+\end{remark}
+
+% =============================================================================
+\section{Proof Roadmap}
+% =============================================================================
+
+This section should be developed into the technical proof section of the paper. Each subsection corresponds to one reusable proof module.
+
+\subsection{Stage I: Concentration for Adaptively Collected Samples}
+
+\begin{lemma}[Adaptive concentration]
+\label{lem:adaptive_concentration}
+Fix \(\delta_{\mathrm{conc}}\in(0,1)\). With probability at least \(1-\delta_{\mathrm{conc}}\), for every regime \(r\), arm \(k\), and sample count \(1\leq n\leq T\), every clean empirical mean computed from \(n\) observations of arm \(k\) generated under regime \(r\) satisfies
+\begin{equation}
+    |\widehat\mu_{r,k,n}-\mu_{r,k}|
+    \leq
+    \sigma\sqrt{\frac{2\log(2|\Rcal|KT/\delta_{\mathrm{conc}})}{n}}.
+    \label{eq:mean_concentration}
+\end{equation}
+Consequently, for a balanced clean probe with \(n_0\) samples per arm,
+\begin{equation}
+    \|\phic(\widehat\mu)-\theta_r\|_\infty
+    \leq
+    c(n_0),
+    \qquad
+    c(n_0)=2\sigma\sqrt{\frac{2\log(2|\Rcal|KT/\delta_{\mathrm{conc}})}{n_0}}.
+    \label{eq:shape_radius}
+\end{equation}
+\end{lemma}
+
+\begin{proof}[Proof skeleton]
+For a fixed pair \((r,k)\), define the indicator
+\begin{equation}
+    I_t^{r,k}=\one\{z_t=r,\ A_t=k,\ t\text{ is clean and committed to }(r,k)\}.
+\end{equation}
+Because \(A_t\) and the clean/commit decision are measurable with respect to the information available before permanently using \(Y_t\), the selected noise sum
+\begin{equation}
+    M_n^{r,k}=\sum_{t=1}^n I_t^{r,k}\varepsilon_t
+\end{equation}
+is a martingale with sub-Gaussian increments. Apply a self-normalized or optional-skipping Hoeffding/Azuma inequality to the stopped sequence of observations for \((r,k)\). Then union bound over regimes, arms, and sample counts \(n\leq T\). The shape bound follows because centering can increase the sup-norm error by at most a factor two:
+\begin{equation}
+    \|\phic(\widehat\mu)-\phic(\mu_r)\|_\infty
+    \leq 2\|\widehat\mu-\mu_r\|_\infty .
+\end{equation}
+\end{proof}
+
+\proofguide{This is the place where the martingale argument belongs. It is only needed to justify concentration under adaptive sampling: the algorithm chooses arms based on past rewards, so arm-specific samples are collected at random history-dependent times. Classical UCB proofs hide the same issue by indexing each arm by its own i.i.d. reward sequence; the martingale proof is the cleaner formulation for RA-TS.}
+
+\citationrole{For the bandit proof intuition, cite classical UCB analyses or modern textbook treatments. For this paper, the main role of the lemma is to provide the same concentration event used in UCB-style proofs, then use it for shape matching. In the non-stationary setting, \citet{GarivierMoulines2011} explicitly handle concentration with random numbers of summands.}
+
+\subsection{Stage II: Correct Regime Matching}
+
+\begin{lemma}[Correct matching]
+\label{lem:correct_matching}
+Assume the concentration event of Lemma \ref{lem:adaptive_concentration} holds. Suppose a clean probe is collected during regime \(r\). If the threshold condition \eqref{eq:matching_threshold_condition} holds, then the nearest library entry is the entry corresponding to \(r\), if such an entry already exists; otherwise no existing entry passes the match threshold and a new entry is created.
+\end{lemma}
+
+\begin{proof}[Proof skeleton]
+Let \(\widehat\xi\) be the centered shape of the current probe. If regime \(r\) already has an entry \(g(r)\), then concentration gives
+\begin{equation}
+    \|\widehat\xi-\theta_r\|_\infty\leq c(n_0),
+    \qquad
+    \|\widehat\theta_{g(r)}-\theta_r\|_\infty\leq c(n_0).
+\end{equation}
+Therefore
+\begin{equation}
+    \|\widehat\xi-\widehat\theta_{g(r)}\|_\infty\leq 2c(n_0)\leq \tau_{\mathrm{match}}.
+\end{equation}
+For any different entry \(g(r')\), Assumption \ref{ass:shape_separation} gives
+\begin{align}
+    \|\widehat\xi-\widehat\theta_{g(r')}\|_\infty
+    &\geq
+    \|\theta_r-\theta_{r'}\|_\infty
+    -\|\widehat\xi-\theta_r\|_\infty
+    -\|\widehat\theta_{g(r')}-\theta_{r'}\|_\infty
+    \\
+    &\geq
+    \Delta_{\mathrm{sh}}-2c(n_0)
+    >\tau_{\mathrm{match}}.
+\end{align}
+Thus the correct known entry is uniquely closer than every incorrect entry. If no entry for \(r\) exists, all existing entries correspond to \(r'\neq r\), so all distances exceed \(\tau_{\mathrm{match}}\), and a new entry is created.
+\end{proof}
+
+\proofguide{This is the RA-TS-specific geometric lemma. It should be written fully in the paper because it is short, clean, and central to the contribution.}
+
+\subsection{Stage III: Library Purity}
+
+\begin{lemma}[Library purity]
+\label{lem:library_purity}
+On the event \(\mathcal E_{\mathrm{conc}}\cap\mathcal E_{\mathrm{det}}\), every library entry contains observations generated by one and only one true regime. Moreover, whenever a regime is revisited, its observations are assigned to the same library entry.
+\end{lemma}
+
+\begin{proof}[Proof skeleton]
+Proceed by induction over completed Acquire phases. The first completed Acquire phase creates a new entry from a clean probe, so the claim holds. Assume it holds up to the previous completed Acquire phase. Consider the next completed Acquire phase. By the minimum dwell-time assumption and the detector-validity event, the probe is collected inside one true regime. By Lemma \ref{lem:correct_matching}, the probe is either assigned to the correct existing entry or creates a new entry for a genuinely unseen regime. During the preceding Track phase, delayed commit with \(q\geq d\) ensures that observations collected after a hidden change are still in the queue when the alarm occurs and are discarded. Hence no post-change observations are committed to the previous regime entry. Therefore library purity is preserved.
+\end{proof}
+
+\proofguide{This induction is the key step that makes the stationary TS theorem applicable. Without delayed commit, the induction fails because samples from the next regime can be committed during the detection delay.}
+
+\citationrole{The idea of reusing data across repeated instances is conceptually related to Routine Bandits \citep{SaberEtAl2021}. However, the purity proof is specific to RA-TS because the algorithm must detect online changes and avoid contamination.}
+
+\subsection{Stage IV: Regret Decomposition}
+
+On the good event, decompose regret as
+\begin{equation}
+    \Reg_T
+    \leq
+    \Reg_T^{\mathrm{track}}
+    +\Reg_T^{\mathrm{probe}}
+    +\Reg_T^{\mathrm{delay}}
+    +\Reg_T^{\mathrm{queue}}.
+\end{equation}
+The probe term is bounded by
+\begin{equation}
+    \Reg_T^{\mathrm{probe}}
+    \leq \Delta_{\max}G_T n_0K .
+\end{equation}
+The detection-delay term is bounded by
+\begin{equation}
+    \Reg_T^{\mathrm{delay}}
+    \leq \Delta_{\max}G_T d .
+\end{equation}
+The delayed-commit overhead is bounded by
+\begin{equation}
+    \Reg_T^{\mathrm{queue}}
+    \leq \Delta_{\max}G_T q .
+\end{equation}
+The Track term is bounded by summing stationary Thompson-sampling regret over true regimes:
+\begin{equation}
+    \E[\Reg_T^{\mathrm{track}}\mid \mathcal E_{\mathrm{conc}}\cap\mathcal E_{\mathrm{det}}]
+    \leq
+    C_{\mathrm{TS}}
+    \sum_{r\in\Rcal}
+    \sum_{k\neq k^\star(r)}
+    \frac{\sigma^2\log(T_r(T)\vee2)}{\Delta_{r,k}}
+    +C'_{\mathrm{TS}}\sum_{r\in\Rcal}\sum_{k\neq k^\star(r)}\Delta_{r,k}.
+\end{equation}
+Finally, outside the good event, regret is at most \(\Delta_{\max}T\), giving the failure contribution
+\begin{equation}
+    \Delta_{\max}T(\delta_{\mathrm{conc}}+\delta_{\mathrm{det}}).
+\end{equation}
+
+\proofguide{This is the same macro-structure as switching-bandit proofs: clean intervals get stationary regret bounds; boundary intervals around changes are charged directly by their length. The novelty is that the clean Track intervals belonging to the same regime are pooled rather than treated as fresh restarts.}
+
+\citationrole{Use \citet{GarivierMoulines2011} for the clean/boundary decomposition and \citet{LiuLeeShroff2018,BessonKaufmannMaillardSeznec2022} for detector-overhead accounting. Use \citet{AgrawalGoyal2013} for the stationary TS Track term.}
+
+% =============================================================================
+\section{Anytime and Infinite-Horizon Version}
+% =============================================================================
+
+The finite-horizon theorem uses confidence radii and detector parameters calibrated to a fixed horizon \(T\). For unlimited-time operation, the algorithm should use summable episode-wise error budgets. Let episode \(j\) use error budget
+\begin{equation}
+    \delta_j=\frac{6\delta}{\pi^2j^2}.
+\end{equation}
+Choose
+\begin{equation}
+    n_j
+    \asymp
+    \frac{\sigma^2}{\Delta_{\mathrm{sh}}^2}
+    \log\left(\frac{Kj^2}{\delta}\right),
+    \qquad
+    h_j\asymp \log\left(\frac{j^2}{\delta}\right),
+    \qquad
+    q_j\geq d_j .
+\end{equation}
+
+\begin{theorem}[Anytime recurrence-aware regret]
+\label{thm:anytime_regret}
+Assume the finite-horizon conditions hold uniformly with episode-wise parameters \((n_j,h_j,d_j,q_j)\), and that the detector and matching failure probabilities are summable. Then, with probability at least \(1-\delta\), the regret bound holds simultaneously for all finite prefixes \(T\), up to replacing the fixed overhead \(G_T(n_0K+d+q)\) by
+\begin{equation}
+    \sum_{j=1}^{G_T}\bigl(n_jK+d_j+q_j\bigr).
+\end{equation}
+Consequently, if \(n_j,d_j,q_j=O(\log j)\), then
+\begin{equation}
+    \E[\Reg_T]
+    =
+    O\left(
+    \sum_{r\in\Rcal}\sum_{k\neq k^\star(r)}
+    \frac{\sigma^2\log(T_r(T)\vee2)}{\Delta_{r,k}}
+    +KG_T\log(G_T\vee2)
+    \right),
+\end{equation}
+up to problem-dependent constants and lower-order terms. Hence \(\E[\Reg_T]/T\to0\) whenever
+\begin{equation}
+    KG_T\log(G_T\vee2)=o(T).
+\end{equation}
+\end{theorem}
+
+\proofguide{This theorem is proved by replacing the fixed-horizon union bound with a peeling or summable-error argument. The key idea is that a fixed per-episode error probability is not enough over infinitely many episodes; the probabilities must be summable. The same change is required for detector calibration.}
+
+\citationrole{The infinite-horizon result should be presented as an anytime extension of the finite-horizon proof. Use standard anytime concentration/peeling language. The switching-bandit literature typically states finite-horizon bounds; the contribution here is to express the condition for vanishing average regret under recurring regimes and sparse switching.}
+
+% =============================================================================
+\section{Detector Guarantee: Two Options}
+% =============================================================================
+
+There are two mathematically valid ways to handle the detector in the paper.
+
+\subsection{Option A: Detector Validity as an Assumption}
+
+The first version of the paper may keep Assumption \ref{ass:detector_event}. This is defensible if the main contribution is recurrence-aware memory rather than a new change-point detector. The theorem then reads as a modular guarantee: whenever the detector has false-alarm and delay guarantees, RA-TS inherits a regret bound with recurrence-aware learning cost.
+
+\subsection{Option B: Prove a Detector Theorem}
+
+A stronger paper would replace Assumption \ref{ass:detector_event} with a theorem. A possible target is:
+
+\begin{proposition}[Target detector theorem]
+\label{prop:detector_target}
+Suppose the detector statistic is updated by
+\begin{equation}
+    G_t=\max\{0,G_{t-1}+|Y_t-b|-\nu\}.
+\end{equation}
+Under no change, choose \(\nu>\E|\varepsilon_t|\) and threshold \(h\) so that
+\begin{equation}
+    \Pbb(\text{false alarm before time }T)\leq \delta_{\mathrm{FA}}.
+\end{equation}
+After a visible change of magnitude at least \(\eta\), choose \(\nu<\E|\eta+\varepsilon_t|\) so that
+\begin{equation}
+    \Pbb(\text{detection delay}>d)\leq \delta_{\mathrm{delay}}.
+\end{equation}
+Then Assumption \ref{ass:detector_event} holds with
+\begin{equation}
+    \delta_{\mathrm{det}}\leq \delta_{\mathrm{FA}}+G_T\delta_{\mathrm{delay}}.
+\end{equation}
+\end{proposition}
+
+\proofguide{This proposition is not yet a finished theorem. To finish it, one must prove concentration for the reflected random walk/CUSUM statistic under no change and after change. This is the most technical part. If not central to the paper, keep the detector-validity assumption. If central, model the proof after GLR-klUCB or CUSUM-UCB.}
+
+\citationrole{The false-alarm and detection-delay proof should follow the detector analyses in \citet{LiuLeeShroff2018} or the GLR detector proof of \citet{BessonKaufmannMaillardSeznec2022}. The GLR route may be more rigorous and easier to cite, but it would replace the current absolute-residual CUSUM with a likelihood-ratio detector. The CUSUM route preserves the current detector but requires careful sub-Gaussian random-walk bounds.}
+
+% =============================================================================
+\section{Experiments}
+% =============================================================================
+
+The empirical section should demonstrate the value of recurrence-aware memory rather than only comparing TS against UCB. The following experiments are recommended.
+
+\paragraph{Synthetic recurring regimes.}
+Generate \(|\Rcal|\) regimes with separated centered shapes. Construct timelines with varying number of episodes \(G_T\), recurrence frequency, and dwell time. Compare RA-TS against:
+\begin{enumerate}[leftmargin=*]
+    \item stationary TS that ignores changes;
+    \item restart TS with perfect or detected changes;
+    \item sliding-window or discounted UCB;
+    \item CUSUM-UCB or another change-detection restart baseline;
+    \item oracle-regime TS that knows the active regime label.
+\end{enumerate}
+
+\paragraph{Ablation studies.}
+Report ablations without memory, without centered matching, without delayed commit, and with incorrect matching thresholds. These ablations should show which component is responsible for the recurrence benefit and which component is needed for robustness.
+
+\paragraph{Metrics.}
+Report cumulative regret, average regret, number of created library entries, matching accuracy, false alarms, detection delay, and contamination rate. The contamination rate is especially important to justify delayed commit.
+
+% =============================================================================
+\section{Discussion and Limitations}
+% =============================================================================
+
+The theoretical guarantee requires shape separation, sufficient dwell time, detector visibility, and a finite number of distinct regimes. These are substantive assumptions. In particular, if switches occur with linear frequency, the regret bound becomes linear because every episode incurs a nonzero identification and detection overhead. This is unavoidable without additional side information. The recurrence benefit is therefore not that regret is uniformly bounded, but that the learning cost is paid per distinct regime rather than per episode.
+
+The detector observes only played arms. Consequently, changes affecting only unplayed arms may not be detected promptly. This is a limitation shared by low-overhead active detectors. A more robust version could add occasional monitoring pulls or use a detector based on forced exploration, at the cost of additional regret.
+
+% =============================================================================
+\section{Conclusion}
+% =============================================================================
+
+RA-TS provides a simple mechanism for exploiting recurrence in piecewise-stationary bandits. Its proof should be presented modularly: concentration and matching identify regimes, delayed commit preserves library purity, the detector bounds the cost of changes, and stationary Thompson-sampling regret controls learning within each recovered regime. The resulting regret bound separates the cost of learning distinct regimes from the cost of tracking switches, yielding vanishing average regret whenever the number of episodes grows sublinearly enough.
+
+% =============================================================================
+% Bibliography
+% =============================================================================
+
+\begin{thebibliography}{99}
+
+\bibitem[Agrawal and Goyal(2013)]{AgrawalGoyal2013}
+Shipra Agrawal and Navin Goyal.
+\newblock Further optimal regret bounds for Thompson sampling.
+\newblock In \emph{Proceedings of the Sixteenth International Conference on Artificial Intelligence and Statistics}, volume 31 of PMLR, pages 99--107, 2013.
+
+\bibitem[Besson et~al.(2022)]{BessonKaufmannMaillardSeznec2022}
+Lilian Besson, Emilie Kaufmann, Odalric-Ambrym Maillard, and Julien Seznec.
+\newblock Efficient change-point detection for tackling piecewise-stationary bandits.
+\newblock \emph{Journal of Machine Learning Research}, 23(77):1--40, 2022.
+
+\bibitem[Garivier and Moulines(2011)]{GarivierMoulines2011}
+Aur\'elien Garivier and Eric Moulines.
+\newblock On upper-confidence bound policies for switching bandit problems.
+\newblock In \emph{Algorithmic Learning Theory}, pages 174--188. Springer, 2011.
+
+\bibitem[Kaufmann et~al.(2012)]{KaufmannKordaMunos2012}
+Emilie Kaufmann, Nathaniel Korda, and R\'emi Munos.
+\newblock Thompson sampling: An asymptotically optimal finite-time analysis.
+\newblock In \emph{Algorithmic Learning Theory}, pages 199--213. Springer, 2012.
+
+\bibitem[Liu et~al.(2018)]{LiuLeeShroff2018}
+Fang Liu, Joohyun Lee, and Ness Shroff.
+\newblock A change-detection based framework for piecewise-stationary multi-armed bandit problem.
+\newblock In \emph{Proceedings of the 32nd AAAI Conference on Artificial Intelligence}, 2018.
+
+\bibitem[Maillard and Mannor(2014)]{MaillardMannor2014}
+Odalric-Ambrym Maillard and Shie Mannor.
+\newblock Latent bandits.
+\newblock In \emph{Proceedings of the 31st International Conference on Machine Learning}, volume 32 of PMLR, pages 136--144, 2014.
+
+\bibitem[Mellor and Shapiro(2013)]{MellorShapiro2013}
+Joseph Mellor and Jonathan Shapiro.
+\newblock Thompson sampling in switching environments with Bayesian online change detection.
+\newblock In \emph{Proceedings of the Sixteenth International Conference on Artificial Intelligence and Statistics}, volume 31 of PMLR, pages 442--450, 2013.
+
+\bibitem[Saber et~al.(2021)]{SaberEtAl2021}
+Hussein Saber, Odalric-Ambrym Maillard, and Pierre{\nobreakdash-}Alain Fouque.
+\newblock Routine bandits: Minimizing regret on recurring problems.
+\newblock In \emph{Machine Learning and Knowledge Discovery in Databases. Research Track}, ECML PKDD 2021, Lecture Notes in Computer Science. Springer, 2021.
+
+\end{thebibliography}
+
+\end{document}

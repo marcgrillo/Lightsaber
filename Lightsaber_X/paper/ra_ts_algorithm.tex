@@ -1,0 +1,414 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{xspace}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+\newtheorem{theorem}{Theorem}
+
+\newcommand{\F}{\mathcal F}
+\newcommand{\A}{\mathcal A}
+\newcommand{\Lcal}{\mathcal L}
+\newcommand{\R}{\mathbb R}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Prob}{\mathbb P}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\ACQ}{\textsc{Acquire}\xspace}
+\newcommand{\TRACK}{\textsc{Track}\xspace}
+
+% pseudocode readability
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algnewcommand\algorithmicand{\textbf{and}}
+
+\title{Recurrence-Aware Thompson Sampling\\
+\large A Simple Algorithm for Bandits with Recurring Regimes}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study a decision problem in which, at every round, a learner picks one of $K$ actions and
+receives a reward. The catch is that the world is not fixed: it switches, from time to time,
+between a small number of hidden ``regimes,'' and the \emph{same} regimes keep coming back.
+A good learner should (i) quickly figure out which regime is currently active, (ii) exploit it,
+(iii) notice when it changes, and (iv) \emph{remember} regimes it has already learned so that a
+returning regime is recognized instead of relearned from scratch. We present a deliberately
+minimal algorithm, \emph{Recurrence-Aware Thompson Sampling} (RA-TS), that does all four using
+only three familiar pieces: Thompson sampling to choose actions, a change detector to spot when
+a regime ends, and a small memory of past regimes to warm-start on their return. This note
+explains the problem, the algorithm, and its guarantees in self-contained terms, states the
+algorithm in one pseudocode block, and lists every parameter in one table.
+\end{abstract}
+
+\section{The problem, in plain terms}
+\label{sec:problem}
+
+There are $K$ \emph{actions} (also called arms), $\A=\{1,\dots,K\}$. Time proceeds in rounds
+$t=1,2,\dots,T$. In round $t$ the learner chooses an action $A_t\in\A$ and observes a numerical
+reward $Y_t$. The learner wants the total reward over $T$ rounds to be as large as possible.
+
+The environment is \emph{piecewise stationary}: the timeline is cut into \emph{episodes}, and
+inside one episode the rewards are governed by a single hidden \emph{regime} $z$. When an episode
+ends, the regime changes. The key feature of our setting is \emph{recurrence}: only a few
+distinct regimes ever occur, and they reappear over and over.
+
+\paragraph{Level versus shape.}
+Within a regime $z$, action $k$ has an (unknown) average reward
+\begin{equation}
+    \mu_k^{(z)} \;=\; \underbrace{\ell^{(z)}}_{\text{level}} \;+\; \underbrace{\theta_k^{(z)}}_{\text{shape}},
+    \qquad \sum_{k=1}^K \theta_k^{(z)} = 0 .
+    \label{eq:level-shape}
+\end{equation}
+The \emph{level} $\ell^{(z)}$ is a number added to every action equally (an overall ``how good
+are things right now'' offset). The \emph{shape} $\bm\theta^{(z)}$ says which actions are better
+or worse than average; it sums to zero by definition. The best action of a regime,
+$k^\star(z)=\argmax_k \theta_k^{(z)}$, depends only on the shape. This distinction matters:
+if every reward suddenly rises or falls by the same amount, the level changes but the best
+action does not, so that is \emph{not} a real regime change for our purposes. A real regime
+change is a change of \emph{shape}.
+
+To compare shapes we use \emph{centering}. For any vector $\bm v\in\R^K$, subtract its own
+average:
+\begin{equation}
+    \phi(\bm v) \;=\; \bm v - \frac1K\sum_{j=1}^K v_j .
+\end{equation}
+Centering removes the level automatically: $\phi(\bm\mu^{(z)})=\bm\theta^{(z)}$. Equivalently,
+we can compare actions by their \emph{differences} $\mu_i-\mu_j$, which also do not depend on the
+level. This is why the algorithm never needs to estimate $\ell$.
+
+\paragraph{Noise.}
+Observed rewards are the true mean plus zero-mean noise, $Y_t = \mu_{A_t}^{(z)} + \varepsilon_t$,
+where $\varepsilon_t$ is $\sigma$-sub-Gaussian (informally: noise of typical size $\sigma$, with
+light tails). This is the only probabilistic assumption needed to state the algorithm.
+
+\paragraph{Goal.}
+We measure performance by \emph{regret}: the total reward we lose compared with an oracle that
+always plays the best action of the current regime. Section~\ref{sec:regret} bounds it.
+
+\section{The idea in one paragraph}
+\label{sec:idea}
+
+RA-TS combines three standard tools. \textbf{(1)~Thompson sampling} chooses actions during normal
+operation: it keeps a probability estimate of each action's mean and plays the one that looks
+best under a random draw, which automatically balances trying and exploiting and needs no tuning.
+\textbf{(2)~A change detector} watches the reward of the action we are playing and raises an alarm
+when it drifts away from what the current regime predicts. \textbf{(3)~A memory (``library'')} of
+regimes we have already learned lets us \emph{recognize} a returning regime from its shape and
+\emph{resume} its learning instead of starting over. The only extra ingredient is a very short,
+bounded ``probe'' that tries each action a few times right after a change, so that we have enough
+information to recognize the regime. Everything else is plain Thompson sampling.
+
+\section{What the algorithm remembers}
+\label{sec:state}
+
+\paragraph{The library.}
+The library $\Lcal=\{1,\dots,J\}$ holds one entry per regime discovered so far. Entry $g$ stores,
+for each action $k$, how many times that action has been played in regime $g$ and the sum of the
+rewards seen:
+\begin{equation}
+    N_{g,k}\ (\text{count}), \qquad S_{g,k}\ (\text{reward sum}), \qquad
+    \widehat\mu_{g,k}=\frac{S_{g,k}}{N_{g,k}}, \qquad
+    \widehat{\bm\theta}_g=\phi(\widehat{\bm\mu}_g).
+    \label{eq:lib}
+\end{equation}
+The counts and sums $(N_g,S_g)$ are the \emph{only} things stored. The mean
+$\widehat{\bm\mu}_g$ and the shape $\widehat{\bm\theta}_g$ are \emph{derived on demand} from them,
+never maintained separately: whenever they are read they simply reflect the current counts.
+
+\paragraph{When $(N_g,S_g)$---and hence $\widehat{\bm\theta}_g$---change.}
+This happens at exactly two kinds of event, and nowhere else:
+\begin{enumerate}[leftmargin=1.8em,label=(\roman*),itemsep=1pt]
+\item \emph{Once, when a probe is assigned to regime $g$}: the whole identification buffer is added
+in one shot, $N_g \mathrel{+}= \bm n,\ S_g \mathrel{+}= \bm s$.
+\item \emph{Every \TRACK round in regime $g$}: only the single action $a$ just played is
+incremented, $N_{g,a}\mathrel{+}=1,\ S_{g,a}\mathrel{+}=Y$.
+\end{enumerate}
+So the shape estimate $\widehat{\bm\theta}_g$ is refreshed on \emph{every} \TRACK round (through
+$\widehat{\bm\mu}_g$), yet it is \emph{read} in only one place: during \ACQ, when a freshly collected
+probe buffer is matched against the library. The mean vector $\widehat{\bm\mu}_g$ is read once more,
+at the single moment a regime is identified and \TRACK begins, to initialize the drift detector's
+baseline $\mathrm{base}\gets\widehat{\bm\mu}_g$; that value is then frozen for the entire \TRACK
+phase and does not follow the subsequent updates to $(N_g,S_g)$. Two consequences are worth noting. First, because
+Thompson sampling plays mostly the best action, \TRACK sharpens mainly that one coordinate of
+$\widehat{\bm\theta}_g$; the other coordinates keep the coarser accuracy they had from the probe.
+Second, this causes no bias: each coordinate $\widehat\mu_{g,k}=S_{g,k}/N_{g,k}$ is an unbiased
+estimate of action $k$'s mean no matter how few or how many times $k$ was played, so
+$\widehat{\bm\theta}_g$ remains an unbiased shape estimate despite the very unequal counts. Its
+usefulness for matching is therefore limited by the \emph{least}-sampled actions, i.e.\ by the
+radius $b(n_{\min})$---exactly the quantity that appears in the analysis. These raw statistics are
+also precisely the sufficient statistics Thompson sampling needs, so a regime is resumed just by
+continuing to add to them.
+
+\paragraph{The scratch buffer and the baseline.}
+Two more short-lived quantities are kept for the current situation: a \emph{buffer} $(\bm n,\bm s)$
+of counts and sums collected while identifying the regime, and, once a regime is being tracked, a
+frozen \emph{baseline} vector $\mathrm{base}=\widehat{\bm\mu}_g$ (the regime's mean reward captured
+at the moment the regime is identified and \TRACK begins) together with a per-action detector
+statistic $G_k$.
+
+\section{The two modes}
+\label{sec:modes}
+
+\paragraph{\ACQ (recognize the regime).}
+Right after a change, we do not yet know which regime we are in. We run a short \emph{coverage
+probe}: repeatedly play the least-tried action until every action has been tried $n_{\min}$ times.
+This guarantees we have a few samples of \emph{every} action, which is exactly what is needed to
+estimate the shape. The moment coverage is reached, we compute the buffer's shape
+$\widehat{\bm\psi}=\phi(\bm s/\bm n)$ and compare it to every library entry using the distance
+\begin{equation}
+    D_g \;=\; \norm{\widehat{\bm\psi} - \widehat{\bm\theta}_g}_\infty
+    \qquad (\text{largest per-action shape difference}).
+\end{equation}
+If the closest entry $g^\star$ is within a tolerance $\tau_{\mathrm{match}}$, we decide it is that
+regime and \emph{warm-start}: we fold the buffer into entry $g^\star$ and continue its learning.
+Otherwise the shape matches nothing we know, so we create a new library entry. Either way we then
+switch to \TRACK. Because comparison uses centered shapes (equivalently, action differences), it
+ignores the reward level entirely.
+
+\paragraph{\TRACK (exploit and watch).}
+Now that the regime is known, we run Thompson sampling on its stored posterior. For each action
+we draw a random plausible mean and play the best draw:
+\begin{equation}
+    \widetilde\mu_k \sim \mathcal N\!\big(m_{g,k},\, v_{g,k}\big),
+    \qquad A_t=\argmax_k \widetilde\mu_k,
+    \label{eq:ts}
+\end{equation}
+where $(m_{g,k},v_{g,k})$ is the usual Gaussian posterior mean and variance built from the prior
+$\mathcal N(\mu_0,\tau_0^2)$ and the stored data $(N_{g,k},S_{g,k})$:
+\begin{equation}
+    v_{g,k}=\Big(\tfrac{1}{\tau_0^2}+\tfrac{N_{g,k}}{\sigma^2}\Big)^{-1},
+    \qquad
+    m_{g,k}=v_{g,k}\Big(\tfrac{\mu_0}{\tau_0^2}+\tfrac{S_{g,k}}{\sigma^2}\Big).
+    \label{eq:post}
+\end{equation}
+As more data accumulate, the draws concentrate and Thompson sampling plays the best action almost
+always: deterministic exploitation appears on its own, with no separate ``commit'' step.
+
+At the same time, we watch for drift. After playing action $a$ and seeing reward $Y_t$, we measure
+how surprising it is relative to the frozen baseline and accumulate the surprise in a one-sided
+CUSUM statistic:
+\begin{equation}
+    e_t = Y_t - \mathrm{base}[a],
+    \qquad
+    G_a \leftarrow \max\{0,\; G_a + |e_t| - \nu\}.
+    \label{eq:cusum}
+\end{equation}
+An alarm is raised when $G_a \ge h$, and we return to \ACQ. Three deliberate choices make this
+work: the baseline is \emph{frozen} (a running average would silently follow the drift and hide
+it); the surprise uses the \emph{absolute} residual $|e_t|$ (so both increases and decreases are
+caught); and the slack $\nu$ is set \emph{above} the average noise, so with no drift the statistic
+is pushed back to zero (few false alarms), while a real shift makes it climb.
+
+\section{The algorithm and its parameters}
+\label{sec:alg}
+
+Algorithm~\ref{alg:rats} states RA-TS in full. Table~\ref{tab:params} lists every parameter, what
+it means, and how to set it.
+
+\begin{algorithm}[t]
+\caption{Recurrence-Aware Thompson Sampling (RA-TS)}
+\label{alg:rats}
+\begin{algorithmic}[1]
+\Require actions $K$, noise scale $\sigma$, prior $(\mu_0,\tau_0)$, coverage $n_{\min}$,
+match tolerance $\tau_{\mathrm{match}}$, detector slack $\nu$, threshold $h$
+\Statex \emph{Throughout: $\widehat{\bm\mu}_g=S_g/N_g$ and $\widehat{\bm\theta}_g=\phi(\widehat{\bm\mu}_g)$ are recomputed from the current $(N_g,S_g)$.}
+\State library $\Lcal \gets \varnothing$;\quad mode $\gets \ACQ$;\quad buffer $(\bm n,\bm s)\gets(\bm 0,\bm 0)$
+\For{$t = 1,2,\dots,T$}
+  \If{mode $=\ACQ$}
+     \State play $a \gets \argmin_k n_k$, observe $Y$ \Comment{coverage probe: try the least-sampled action}
+     \State $n_a \gets n_a + 1$;\quad $s_a \gets s_a + Y$
+     \If{$\min_k n_k \ge n_{\min}$} \Comment{every action covered: identify the regime}
+        \State $\widehat{\bm\psi} \gets \phi(\bm s / \bm n)$;\quad
+               $g^\star \gets \argmin_{g\in\Lcal} \norm{\widehat{\bm\psi}-\widehat{\bm\theta}_g}_\infty$
+        \If{$\Lcal \ne \varnothing$ \algorithmicand{} $\norm{\widehat{\bm\psi}-\widehat{\bm\theta}_{g^\star}}_\infty \le \tau_{\mathrm{match}}$}
+           \State $N_{g^\star} \gets N_{g^\star} + \bm n$;\quad $S_{g^\star} \gets S_{g^\star} + \bm s$;\quad $g \gets g^\star$ \Comment{match: warm-start}
+        \Else
+           \State append new entry with $(N,S) \gets (\bm n,\bm s)$;\quad $g \gets$ new index \Comment{new regime}
+        \EndIf
+        \State mode $\gets \TRACK$;\quad $\mathrm{base} \gets \widehat{\bm\mu}_g$;\quad $\bm G \gets \bm 0$
+     \EndIf
+  \Else \Comment{mode $=\TRACK$}
+     \State draw $\widetilde\mu_k \sim \mathcal N(m_{g,k},v_{g,k})$ for all $k$ \Comment{Eq.~\eqref{eq:post}}
+     \State play $a \gets \argmax_k \widetilde\mu_k$, observe $Y$ \Comment{Thompson sampling}
+     \State $S_{g,a} \gets S_{g,a} + Y$;\quad $N_{g,a} \gets N_{g,a} + 1$ \Comment{resume/update posterior}
+     \State $G_a \gets \max\{0,\; G_a + |Y - \mathrm{base}[a]| - \nu\}$ \Comment{drift CUSUM on played action}
+     \If{$G_a \ge h$} \Comment{alarm: regime ended}
+        \State mode $\gets \ACQ$;\quad buffer $(\bm n,\bm s) \gets (\bm 0,\bm 0)$
+     \EndIf
+  \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{@{}c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}p{0.36\textwidth}@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} & \textbf{How to set (and typical value)} \\
+\midrule
+$K$ & number of actions & problem-given \\
+$\sigma$ & noise scale (sub-Gaussian proxy) & estimated from data \\
+$\delta$ & failure probability of the confidence bounds & small, e.g.\ $0.1$; enters $L=2\log(8KT/\delta)$ \\
+$T$ & horizon (number of rounds) & problem-given; used only inside $L$ \\
+$\mu_0$ & prior mean of the Thompson posterior & the average reward level; not sensitive \\
+$\tau_0$ & prior standard deviation (diffuse) & large relative to reward spread, e.g.\ $0.5$ \\
+$n_{\min}$ & samples per action required by the probe & $n_{\min} > 32\,\sigma^2 L/\Delta_{\mathrm{sh}}^2$; small in practice (e.g.\ $3$) \\
+$\tau_{\mathrm{match}}$ & shape-match tolerance & in $[\,b(n_{\min}),\,\Delta_{\mathrm{sh}}-b(n_{\min})\,]$; e.g.\ $0.8\,\Delta_{\mathrm{sh}}$ \\
+$\nu$ & detector slack (per-step ``ignore'' band) & $\sigma\sqrt{2/\pi} < \nu < \eta_{\min}$; e.g.\ $1.3\,\sigma$ \\
+$h$ & detector alarm threshold & larger $=$ fewer false alarms, slower detection; e.g.\ $8\,\sigma$ \\
+\midrule
+\multicolumn{3}{@{}l}{\emph{Derived (not tuned):}\ \
+$r(n)=\sigma\sqrt{L/n}$,\ \ $b(n)=2\,r(n)$,\ \
+$\phi(\bm v)=\bm v-\tfrac1K\sum_j v_j$.} \\
+\bottomrule
+\end{tabularx}
+\caption{All parameters of RA-TS. $\Delta_{\mathrm{sh}}$ is the smallest shape separation between
+distinct regimes and $\eta_{\min}$ the smallest change of the played action's mean at a regime
+switch (Assumptions~\ref{ass:sep}--\ref{ass:detect}); both are properties of the environment, not
+tuned. The radius $r(n)$ is the size of the estimation error after $n$ samples; $b(n)$ is its
+centered (shape) counterpart.}
+\label{tab:params}
+\end{table}
+
+\section{Why each piece is there}
+\label{sec:why}
+
+\paragraph{Why a probe, and not just Thompson sampling?}
+It is tempting to drop the probe and let Thompson sampling itself explore during \ACQ. This does
+not work, for a simple reason. Recognizing a regime means telling the actions apart, which
+requires at least a few samples of \emph{every} action, including the bad ones. But Thompson
+sampling is built to \emph{stop} playing actions that look bad: after one or two samples a clearly
+inferior action is almost never chosen again. So coverage is never reached, identification never
+happens, the algorithm stays in \ACQ, and---since the detector only runs in \TRACK---a later
+regime change is not even watched. The probe supplies exactly the missing samples, and nothing
+more: at most $n_{\min}K$ plays, once per episode.
+
+\paragraph{Why remember regimes?}
+Without the library, every reappearance of a regime would be learned from scratch, paying the full
+exploration cost each time. With the library, a returning regime is recognized from its shape and
+its posterior is resumed, so its learning cost is paid essentially once and then amortized over all
+future visits. This is the main advantage under frequent switching among a fixed set of regimes.
+
+\paragraph{Why watch only the played action?}
+The detector updates $G_a$ only for the action actually played, which is almost always the current
+best action. This is enough to catch any change that moves the best action's reward, and it costs
+nothing extra. The price is a blind spot: a change that alters only actions we are \emph{not}
+playing cannot be seen. This is unavoidable for any method that does not periodically re-test every
+action.
+
+\section{Guarantees}
+\label{sec:regret}
+
+We now state what can be proved. We first list the assumptions in words, then give the regret
+bound and a sketch of why each part holds.
+
+\begin{assumption}[Separated regimes]
+\label{ass:sep}
+Distinct regimes differ in shape by at least $\Delta_{\mathrm{sh}}$: for any two regimes that
+occur, $\norm{\bm\theta^{(z)}-\bm\theta^{(z')}}_\infty\ge\Delta_{\mathrm{sh}}>0$. (Regimes are
+actually distinguishable.)
+\end{assumption}
+
+\begin{assumption}[Visible changes]
+\label{ass:visibility}
+When a regime ends, the mean of the action we are committed to moves by at least $\eta_{\min}$.
+(A change shows up on the action we are actually playing.)
+\end{assumption}
+
+\begin{assumption}[Feasible detector and probe]
+\label{ass:detect}
+The constants satisfy $\sigma\sqrt{2/\pi} < \nu < \eta_{\min}$ (the slack sits above the noise but
+below the visible change) and $n_{\min} > 32\,\sigma^2 L/\Delta_{\mathrm{sh}}^2$, i.e.\
+$b(n_{\min}) < \Delta_{\mathrm{sh}}/4$ (a probe resolves the shape to finer than the regime gap),
+with $\tau_{\mathrm{match}}\in[\,b(n_{\min}),\,\Delta_{\mathrm{sh}}-b(n_{\min})\,]$.
+\end{assumption}
+
+\begin{theorem}[Regret bound, high probability]
+\label{thm:main}
+Let $G_T$ be the number of episodes, $\mathcal R$ the set of distinct regimes, $T_r$ the total
+number of \TRACK rounds spent in regime $r$ (so $\sum_r T_r\le T$), $\Delta_{r,k}$ the reward gap
+of action $k$ in regime $r$, and $S_T$ the number of ``short'' episodes (shorter than the
+detection delay plus the probe). Under Assumptions~\ref{ass:sep}--\ref{ass:detect}, with
+probability at least $1-\delta$,
+\begin{equation}
+   R_T \;\le\;
+   \underbrace{\sum_{r\in\mathcal R}\ \sum_{k\ne k^\star(r)} \frac{C\,\sigma^2 \log T_r}{\Delta_{r,k}}}_{\text{(i)}}
+   \;+\;
+   \underbrace{\Delta_{\max}\,(G_T + S_T)\Big(n_{\min}K + \tfrac{h}{\eta_{\min}-\nu}\Big)}_{\text{(ii)}}
+   \;+\;
+   \underbrace{\delta\,T\,\Delta_{\max}}_{\text{(iii)}},
+   \notag
+\end{equation}
+for a universal constant $C$, where $\Delta_{\max}$ bounds the one-round regret.
+\end{theorem}
+
+Each term corresponds to one thing the algorithm does:
+\begin{itemize}[leftmargin=1.6em,itemsep=1pt]
+\item \textbf{(i) Learning.} The cost of Thompson sampling finding the best action in each
+regime---paid \emph{once per regime} and shared over all its recurrences (note the $\log$ of the
+cumulative lifetime $T_r$).
+\item \textbf{(ii) Identify {}+{} detect.} A fixed overhead per episode: the bounded probe
+($\le n_{\min}K$ plays) plus the detection delay ($\approx h/(\eta_{\min}-\nu)$ rounds). The
+$S_T$ part is the small extra cost on ``short'' episodes---those shorter than this overhead, where
+a change can land inside the probe.
+\item \textbf{(iii) Failure.} The rare event that a confidence bound is violated.
+\end{itemize}
+
+\paragraph{Sketch of the learning term.}
+All confidence estimates hold simultaneously on a ``good event'' of probability $\ge 1-\delta$
+(a union bound over actions and sample sizes, which is why $\log(8KT/\delta)$ appears in the
+radii). On that event, because a regime's posterior is only ever \emph{added to} and never reset,
+all Thompson plays ever made in regime $r$ behave like one uninterrupted Thompson run of length
+$T_r$ on a fixed problem. The standard finite-time Thompson-sampling bound for such a run is
+$\sum_{k\ne k^\star}O(\sigma^2\log T_r/\Delta_{r,k})$. The important point is that the logarithm is
+of the \emph{cumulative} lifetime $T_r$, so revisiting a regime does not restart the exploration
+cost---this is the recurrence benefit.
+
+\paragraph{Sketch of the probe and delay term.}
+Each episode triggers at most one \ACQ: a probe of at most $n_{\min}K$ forced plays, plus the
+rounds between the true change and the alarm. After a change the residual $|e_t|$ is at least
+$\eta_{\min}$ on average, so the CUSUM climbs at rate $\ge\eta_{\min}-\nu$ and crosses $h$ in about
+$h/(\eta_{\min}-\nu)$ rounds. Each such round costs at most $\Delta_{\max}$.
+
+\paragraph{Sketch of correct identification and the short-episode term.}
+After a clean probe, the shape estimate is within $b(n_{\min})$ of the truth
+(Assumption~\ref{ass:detect}), which is closer than half the regime gap, so the nearest library
+entry is the right regime (if known) and otherwise a new entry is created---identification is
+correct. It can fail only when a change lands \emph{inside} the short probe window, mixing two
+regimes; this happens only on episodes shorter than the probe-plus-delay overhead, and each such
+case costs at most one extra \ACQ cycle. Finally, choosing $\nu>\sigma\sqrt{2/\pi}$ makes the
+detector's ``no drift'' increments negative on average, so false alarms are exponentially rare and
+contribute only to the $\delta T$ failure budget.
+
+\paragraph{Reading the bound.}
+Only the first term depends on the gaps, and it is paid once per regime and then shared across all
+recurrences. The remaining terms are a small, fixed overhead per episode (identify $+$ detect),
+with a little extra only for episodes too short to finish identifying. In the regime of
+interest---a few regimes recurring many times, each episode comfortably longer than the detection
+delay---the bound is dominated by the amortized Thompson term.
+
+\end{document}

@@ -1,0 +1,166 @@
+================================================================================
+ LI-TAR-UCB TRANSITION AUDIT & FIXES (2026-07-02)
+ Tasks: (1) does it find the optimal controller per regime? (2) why not?
+        (3) how does it handle transitions, what mistakes, why?
+        (4) guarantee-preserving fixes, tested.
+ Tooling: bandit_audit_litarucb.py (--fixes toggles the new extensions)
+ Data: cache_1w_r1long (spike_rate=1) and cache_1w_r1freq (spike_rate=2),
+       hold=100s, logistic reward, production hyperparameters.
+================================================================================
+
+--------------------------------------------------------------------------------
+TASK 1 -- CONTROLLER-CHOICE QUALITY PER REGIME (before fixes)
+--------------------------------------------------------------------------------
+Measured over "pure STABLE" windows only (algorithm believes itself settled,
+not in a forced probing block). "near" = played arm within 0.01/0.02 of the
+best arm's expected reward under the current regime mixture.
+
+cache_1w_r1long (baseline):        optimal   near.02
+  R0 (1861 win)                      0.774     0.774
+  R1 (  27 win)                      0.889     0.889
+  R2 (2381 win)                      0.015     0.866   <- plays C1, C1~C2 tie: fine
+cache_1w_r1freq (baseline):
+  R0 (2148 win)                      0.903     0.904
+  R1 ( 179 win)                      0.028     0.961
+  R2 (2302 win)                      0.011     0.416   <- BROKEN: plays C0 58% of R2
+
+Verdict: NO -- not "almost always". The failure is fully explained by belief
+contamination, not by the bandit's arm choice. Split by belief correctness:
+whenever the believed library entry maps to the true regime, play is excellent
+(R0: 0.985-0.987 optimal; R2: 0.921-1.000 near-optimal). ALL the damage sits in
+windows spent under a wrong belief (optimal rate ~0.01-0.05 there), which cover
+13.8% (r1long) and 23.7% (r1freq) of STABLE time.
+
+--------------------------------------------------------------------------------
+TASK 2 -- WHY: THE BLACKOUT MECHANISM
+--------------------------------------------------------------------------------
+The diurnal R0<->R2 drift passes through a stretch where the loop performs so
+badly that the LOGISTIC reward map saturates: every arm scores ~0.02 for tens of
+minutes to ~2.5 h (a "blackout"). Two design assumptions break simultaneously:
+
+ (a) The draft's collapse model assumes a transient collapse depresses all arms
+     by a COMMON amount, PRESERVING the centered shape phi(v) = v - mean(v); the
+     TRANSITION collapse-guard therefore checks "shape still matches the
+     pre-transition regime". But saturation CLIPS all arms to the same floor,
+     so the observed shape is FLAT [~0,~0,~0] -- which does NOT match the
+     pre-transition shape. The guard concludes "not a collapse", certifies the
+     (trivially stable) flat batches, and exits to DIAGNOSTIC mid-blackout.
+ (b) DIAGNOSTIC then classifies the flat shape. Nothing in the library matches
+     (first time), so after q_new=2 blocks it commits a GARBAGE FLAT library
+     entry. Baseline r1long library: entry 1 = [-0.006, 0.011, -0.004], flagged
+     FLAT, co-occurring with R0(311)/R1(27)/R2(1739) -- a regime that does not
+     physically exist. Because it is flat, it sits within r_sh of everything
+     ambiguous and keeps attracting future classifications (R1 too, whose true
+     shape is also nearly flat).
+ (c) Once the algorithm settles STABLE on the flat entry DURING the blackout,
+     the true new regime's arrival is a reward RISE (0.02 -> ~0.25). The drop-
+     CUSUM is ONE-SIDED: rises are invisible. The only remaining detector is
+     the scheduled probe (every L_probe=90 windows = 2.5 h, needing q_det=2
+     deviating blocks -> up to ~5 h of contaminated play). This is exactly the
+     user-reported flaw.
+
+--------------------------------------------------------------------------------
+TASK 3 -- TRANSITION AUDIT (baseline, r1long; 38 true changes)
+--------------------------------------------------------------------------------
+Full table in litarucb_audit_baseline/audit_report.txt. Failure taxonomy:
+
+ * 3 transitions SETTLED DURING A BLACKOUT (dark settles), e.g. #2 (t=6.3h,
+   R0->R2): detected instantly, but DIAG ran inside the blackout, settled at
+   +68 min still dark, then played C0 through the first ~1.3 h of real R2 until
+   probe alarms fired. See fig_transition_02.png in the baseline audit dir.
+ * 4 transitions settled on a MIS-MAPPED entry (e.g. #23, R2->R0 at 90.5h:
+   settled after 293 min, dark, on the flat entry).
+ * 5 MISSED: all are sub-30-min R1 flickers inside R2 (dominance blips at
+   62.7-63.1h and 85.8-86.8h). Near-zero reward cost (C1 is optimal in R1 and
+   within 0.005 of optimal in R2) but they inflate the count.
+ * Detection itself is fast when the level moves: most changes are caught
+   pre-dominance-flip ("(pre)" rows) by the drop-CUSUM during the drift.
+   163 STABLE windows (2.7%) were spent "settled" below the blackout floor.
+
+--------------------------------------------------------------------------------
+TASK 4 -- FIXES (guarantee-preserving), IMPLEMENTATION AND RESULTS
+--------------------------------------------------------------------------------
+Both are opt-in parameters of bandit_policies.LITARUCB (defaults None keep the
+old behaviour bit-identically; verified by rerunning the baseline audit after
+the edit: regret 115.3, switches 1810, identical audit lines).
+
+FIX A -- two-sided level CUSUM (`h_up`):
+  Alongside the drop statistic G, keep G_up accumulating UPWARD residuals
+  max(reward - (ell + theta_Z[a] + B), 0) with the same leak nu; alarm when
+  G_up >= h_up (we use h_up = h = 5 sigma). Now the END of a mistakenly-settled
+  blackout (a rise) triggers re-diagnosis just like a drop would.
+  Guarantees: this is Page's one-sided CUSUM applied to the negated residual --
+  the draft's drop-detection lemma (delay <= h/(Delta - nu) after a level shift
+  Delta > nu; false alarms controlled by h) transfers verbatim. Running both
+  sides doubles the false-alarm probability (union bound), absorbed by an
+  additive O(log 2) in h -- negligible. No other component touched.
+
+FIX B -- blackout guard (`eps_floor`):
+  A TRANSITION batch or DIAGNOSTIC block whose BEST arm-mean is below eps_floor
+  is declared unidentifiable: it never counts toward the stability exit
+  (tstable resets) and never reaches the library; a DIAG block in blackout
+  sends the algorithm back to TRANSITION. eps_floor = 0.5 * min_z max_a r(a,z)
+  = 0.163 here (half the weakest regime's best-arm reward: best-arm rewards are
+  0.60/0.34/0.57 vs collapse level ~0.02 -- a ~4-sigma margin on both sides).
+  Guarantees: needs ONE new, checkable margin assumption -- every genuine
+  regime's best-arm mean exceeds eps_floor (holds by design of the controller
+  library / reward map, and is verified from the calibration table). Under it,
+  blackout batches occur only inside transition intervals, whose total length
+  the draft's regret bound already charges; the guard just makes the algorithm
+  WAIT them out (round-robin in TRANS -- and during a blackout all arms are
+  equally bad, so waiting is also regret-free against the oracle). Crucially it
+  RESTORES the domain of the additive-collapse assumption that saturation was
+  violating, so the existing recognition lemmas apply to every sample that
+  actually reaches the library. No level-invariance is lost: eps_floor is a
+  property of the agent's own reward map (its saturation floor), not of the
+  environment's drifting level.
+
+RESULTS (A/B, same caches, same seed, common random numbers):
+
+                              r1long                  r1freq
+                        baseline   fixed        baseline   fixed
+  regret vs Oracle        115.3     96.0 (-17%)   142.9     84.0 (-41%)
+  dark settles                3        0              3        1
+  wrong-entry settles         4        1              4        7*
+  belief contamination    13.8%     7.5%          23.7%     8.6%
+  dark-STABLE windows      2.7%     0.9%           7.3%     1.3%
+  flat library entry        YES       no             YES       no
+  R0 optimal rate         0.774    0.981          0.903     0.981
+  R1 optimal rate         0.889    1.000          0.028     0.968
+  R2 near-optimal rate    0.866    0.881          0.416     1.000
+  final J                     3        3              3        2
+
+  (* the r1freq "wrong" settles are R1-blips settling on the shared R1/R2
+   entry, which prefers C1 = R1's true optimum -- benign relabeling, as the
+   0.968-1.000 play quality shows.)
+
+TASK-1 CRITERION AFTER FIXES: every regime plays optimal-or-near-optimal in
+>= 0.88 (r1long R2) and >= 0.97 (all others) of pure-STABLE windows. Yes.
+
+Official 1-week head-to-head tables regenerated (LI-TAR-UCB rerun with fixes as
+new production default in make_policies):
+  r1long: LI-TAR-UCB 96.0 << Rule-based 125.1 < TAR-UCB 154.8 < Fixed-C0 155.9
+  r1freq: LI-TAR-UCB 84.0 << TAR-UCB 132.0 < Fixed-C0 151.2 < D-UCB 154.1
+Bonus: the earlier anomaly (LI-TAR-UCB regressing when R1 frequency doubled,
+115->143) is resolved and now runs the RIGHT way (96 -> 84): more regime
+recurrences help a recurrence-learning algorithm once blackout contamination
+is removed. The old regression was contamination compounding, not overfitting.
+
+--------------------------------------------------------------------------------
+RESIDUAL LIMITATIONS (known, understood, lower priority)
+--------------------------------------------------------------------------------
+ 1. Early-library misclassification: right after the first blackout (day 1),
+   post-blackout R2 was classified into the young R0-like entry for ~2 h until
+   probe alarms corrected it (fixed-audit transition #2). Self-heals as the
+   library matures; visible only in the first diurnal cycle.
+ 2. Sub-30-min R1 flickers inside R2 remain undetected (5 and 11 "missed").
+   Cost is ~0 here (shared optimal arm C1); detecting them would need a faster
+   probe cadence, which the L_probe sweep showed is a net regret loss.
+ 3. Settle latency after big transitions is 40-120 min (occasionally longer
+   when the guard waits out a blackout + slow drift). This is the transition/
+   diagnostic sample budget, already tuned (bandit_tune_diag.py); the blackout
+   wait itself is regret-free.
+ 4. paper/li_tar_ucb_draft.tex does not yet contain the two extensions; both
+   slot in cleanly (two-sided version of the drop lemma; a "saturation floor"
+   margin assumption legitimising the blackout guard). Not yet written.
+================================================================================

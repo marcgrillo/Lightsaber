@@ -1,0 +1,762 @@
+\documentclass[11pt]{article}
+
+% -----------------------------------------------------------------------------
+% Packages
+% -----------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{microtype}
+
+% -----------------------------------------------------------------------------
+% Theorem environments
+% -----------------------------------------------------------------------------
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+\newtheorem{fact}{Fact}
+
+% -----------------------------------------------------------------------------
+% Macros
+% -----------------------------------------------------------------------------
+\newcommand{\Acal}{\mathcal A}
+\newcommand{\Fcal}{\mathcal F}
+\newcommand{\Ecal}{\mathcal E}
+\newcommand{\Lcal}{\mathcal L}
+\newcommand{\Pcal}{\mathcal P}
+\newcommand{\Rcal}{\mathcal R}
+\newcommand{\E}{\mathbb E}
+\newcommand{\Pbb}{\mathbb P}
+\newcommand{\one}{\mathbf 1}
+\newcommand{\Reg}{\mathrm{Reg}}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+\newcommand{\phic}{\varphi}
+\newcommand{\eimp}{\varepsilon_{\mathrm{imp}}}
+\newcommand{\etol}{\varepsilon_{\mathrm{tol}}}
+\newcommand{\dsh}{\Delta_{\mathrm{sh}}}
+\newcommand{\taum}{\tau_{\mathrm{match}}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO:} #1\textbf{]}}}
+\newcommand{\proofguide}[1]{\par\smallskip\noindent\textcolor{blue!65!black}{\textbf{Proof guide.} #1}\par\smallskip}
+\newcommand{\citationrole}[1]{\par\smallskip\noindent\textcolor{purple!70!black}{\textbf{Citation role.} #1}\par\smallskip}
+
+% -----------------------------------------------------------------------------
+% Title
+% -----------------------------------------------------------------------------
+\title{Recurrence-Aware Thompson Sampling for Piecewise-Stationary Bandits with Recurring Regimes\\
+\large Analysis without Delayed Commit: Bounded Impurity and a Rigorous Regret Bound}
+\author{Author names omitted for draft}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We analyze Recurrence-Aware Thompson Sampling (RA-TS), an algorithm for stochastic multi-armed bandits in which the environment is piecewise stationary but the same latent regimes recur. The algorithm combines three mechanisms: a short coverage probe for regime identification, a memory (library) of previously encountered regimes represented by per-arm sufficient statistics, and Thompson sampling with a played-arm change detector during tracking. Unlike an earlier version of this analysis, we do \emph{not} modify the algorithm with a delayed-commit queue: all observations are committed to the active library entry immediately, exactly as the algorithm is implemented. The price is that library entries are not perfectly pure --- between a hidden regime change and the detector alarm, a bounded number of samples from the new regime is committed to the old entry. The central technical contribution is a \emph{bounded-impurity} analysis: the contamination of every entry is at most $d$ samples per visit, its effect on every empirical mean is a uniformly bounded bias, and this bias is absorbed into the confidence radii, the matching thresholds, the detector calibration, and the Thompson-sampling regret bound. The main theorem is a recurrence-aware regret decomposition: a learning term that is paid once per \emph{distinct} regime rather than once per episode, an identification-and-detection overhead linear in the number of episodes, and an explicit tolerance term $\etol\, T$ induced by the impurity, where $\etol$ vanishes as the probe length grows. All supporting lemmas (adaptive concentration, correct matching, detector false alarms and delay, structural induction) are proved in full; a single standard estimate from the stationary Thompson-sampling literature is imported with its hypotheses verified.
+\end{abstract}
+
+\paragraph{How to read this draft.}
+This version replaces the earlier proof \emph{roadmap} with the proofs themselves. The blue \emph{Proof guide} paragraphs that survive explain a proof's architecture before the formal argument. Remaining \todo{} markers indicate the items still open (bibliography verification and the experimental section). The delayed-commit queue of the previous draft has been removed deliberately; Remark~\ref{rem:no_queue} explains why, including an empirical reason.
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+Classical stochastic bandit algorithms assume that each arm has a fixed reward distribution. In many online decision problems this assumption is too restrictive: the reward model may change abruptly, yet not arbitrarily. A useful intermediate model is a piecewise-stationary bandit in which time is partitioned into episodes, and the reward distribution remains fixed inside each episode. Existing methods for this setting usually detect changes and then restart or discount old data. Restarting is appropriate when every new episode is unrelated to the past, but it wastes information when the same regimes recur.
+
+This paper studies stochastic bandits with recurring regimes. At each time, the learner observes only the reward of the selected arm. The active regime is hidden, may change at unknown times, and may later reappear. The objective is to exploit the recurrence structure: once a regime has been learned, subsequent visits should not require learning it again from scratch.
+
+We analyze Recurrence-Aware Thompson Sampling (RA-TS). After a detected change, RA-TS performs a short coverage probe that samples each arm enough times to estimate the \emph{shape} of the active regime. The shape is the centered vector of arm means, so it is invariant to additive level shifts that affect all arms equally. The estimated shape is compared with a library of previously encountered regimes. If a match is found, the algorithm resumes the corresponding posterior; otherwise it creates a new library entry. During normal operation, RA-TS uses Thompson sampling and monitors the selected arm with a change detector.
+
+\paragraph{The idea in plain words.}
+Imagine choosing, every few minutes, one of $K$ possible settings for a machine, and receiving a noisy score for the chosen setting. The machine's environment occasionally switches between a handful of operating conditions (``regimes''), and old conditions come back. A good strategy must do four things: figure out which condition is currently active, play the best setting for it, notice when the condition changes, and \emph{remember} conditions it has already learned so a returning one is recognized rather than relearned. RA-TS does exactly these four things with three simple tools. A short \emph{probe} (try every setting a few times) produces a fingerprint of the current condition; a \emph{library} stores one running record per condition seen so far, and the fingerprint is matched against it; \emph{Thompson sampling} --- choose the setting that looks best under a random draw from current beliefs --- handles the play; and a \emph{detector} watches how far rewards drift from what the matched condition predicts, raising an alarm when the drift is too consistent to be noise. The mathematical difficulty is that these components can contaminate one another: between a change and its alarm, a few samples from the new condition are recorded under the old one. The whole point of this paper is to show, with complete proofs, that this contamination is small enough to be harmless --- provided the probe is not too short --- and to quantify exactly what it costs.
+
+\paragraph{No delayed commit.}
+An earlier version of this analysis introduced a delayed-commit queue as a proof device: observations were withheld from the library for $q$ rounds so that samples collected between a hidden change and its alarm could be discarded, keeping every library entry \emph{pure}. We abandon this device and analyze the algorithm exactly as implemented, with immediate commitment. There are three reasons. First, the queue is not statistically innocent: the decision to commit a sample then depends on \emph{future} rewards (whether an alarm occurs within the next $q$ rounds), which destroys the previsibility on which martingale concentration rests and introduces a genuine selection bias (samples with large residuals are selectively discarded). Second, the queue makes the Thompson posterior permanently $q$ samples stale, a delayed-feedback cost that the theory must charge and that experiments confirm is real. Third, and mathematically decisive: purity is not needed. Between a change and its alarm at most $d$ samples are committed to the wrong entry; this \emph{bounded impurity} perturbs every empirical mean by a uniformly bounded bias, and the entire analysis --- matching, detection, and Thompson sampling --- tolerates a bias that is small relative to the relevant separations. The result is a theorem about the implemented algorithm rather than about a modified one.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*]
+    \item We formulate a recurring-regime piecewise-stationary bandit model with level-invariant regime identification (Section~\ref{sec:model}).
+    \item We give a complete, self-contained probabilistic foundation for the analysis of RA-TS with immediate commitment: a family of previsible ``pool'' processes indexed by the true regime, prefix and window concentration for adaptively selected sub-Gaussian sums, and a deterministic master induction that converts these bounds into correct matching, bounded impurity, no false alarms, and bounded detection delay (Sections~\ref{sec:events}--\ref{sec:master}).
+    \item We prove a detector theorem for the played-arm two-sided CUSUM used by RA-TS: no false alarms and detection delay at most $d = O\!\big(K h/\gamma\big)$, where $\gamma$ is the visibility margin (contained in the master induction, Lemma~\ref{lem:master}).
+    \item We prove a regret bound for the Track phase --- Thompson sampling on statistics with bounded impurity --- importing a single standard estimate from the stationary Thompson-sampling literature, with hypotheses verified (Section~\ref{sec:track}).
+    \item The main theorem (Theorem~\ref{thm:main}) is a recurrence-aware regret decomposition with an explicit impurity-induced tolerance term; the learning cost is paid per distinct regime, not per episode. An anytime variant is given in Section~\ref{sec:anytime}.
+\end{enumerate}
+
+\citationrole{The introduction positions the paper at the intersection of stationary Thompson sampling \citep{AgrawalGoyal2013,KaufmannKordaMunos2012,LattimoreSzepesvari2020}, switching/non-stationary bandits \citep{GarivierMoulines2011}, change-detection bandits \citep{LiuLeeShroff2018,BessonKaufmannMaillardSeznec2022}, recurring/latent bandit models \citep{SaberEtAl2021,MaillardMannor2014}, and --- for the bounded-impurity viewpoint --- bandits with adversarial corruptions \citep{LykourisMirrokniPaesLeme2018,GuptaKorenTalwar2019}. The novelty claim is the combination of recurrence-aware memory with online detection and level-invariant matching, analyzed \emph{as implemented}; the impurity analysis exploits the specific structure of the contamination (bounded count, bounded mean shift, mean-zero noise) rather than treating it as adversarial corruption.}
+
+% =============================================================================
+\section{Related Work}
+% =============================================================================
+
+\paragraph{Stationary stochastic bandits and Thompson sampling.}
+For a single stationary bandit instance, Thompson sampling enjoys logarithmic gap-dependent regret bounds and near-optimal problem-independent bounds \citep{AgrawalGoyal2013,KaufmannKordaMunos2012}; textbook treatments include \citet{LattimoreSzepesvari2020}. These results are the template for the Track phase of RA-TS. Because our library entries are contaminated by a bounded number of foreign samples, we cannot import a stationary theorem as a black box; instead we re-derive the pull-count bound with a bias-tolerant margin, importing only the inverse-probability moment estimate that powers the classic proof (Fact~\ref{fact:invp}).
+
+\paragraph{Piecewise-stationary and switching bandits.}
+\citet{GarivierMoulines2011} prove regret bounds for discounted and sliding-window UCB by decomposing time into intervals close to and far from breakpoints. Our decomposition follows the same philosophy: clean Track rounds are analyzed as stationary, while identification and detection rounds are charged by their length. Two of our technical devices also appear there in embryonic form: concentration uniformly over windows with a random number of summands, and charging boundary effects per change point.
+
+\paragraph{Change-detection bandits.}
+\citet{LiuLeeShroff2018} study CUSUM-based restart policies; \citet{BessonKaufmannMaillardSeznec2022} combine klUCB with a GLR detector and prove false-alarm and delay guarantees that are inserted into the regret analysis. We follow the same architecture but for a different detector (a two-sided, played-arm, frozen-baseline CUSUM embedded in Thompson sampling rather than forced exploration), and we prove its false-alarm and delay properties directly rather than assuming them.
+
+\paragraph{Recurring and latent bandits.}
+Routine Bandits \citep{SaberEtAl2021} study a learner repeatedly facing one of several recurring bandit instances; Latent Bandits \citep{MaillardMannor2014} index reward distributions by hidden types. These works motivate the library mechanism, but in RA-TS regime switches occur online at unknown times and must be detected from the reward stream itself.
+
+\paragraph{Corrupted bandits and delayed feedback.}
+Stochastic bandits with adversarial corruptions \citep{LykourisMirrokniPaesLeme2018,GuptaKorenTalwar2019} bound regret under a total corruption budget. Our impurity is a corruption of a very specific, benign form --- at most $d$ samples per episode boundary, each with a mean shift bounded by the inter-regime spread $B$, and with honest mean-zero noise --- which is why we obtain constant-factor degradation rather than the additive $\Theta(KC)$ cost of the adversarial setting. Bandits under delayed feedback \citep{JoulaniGyorgySzepesvari2013} quantify the cost of stale statistics; this is the cost the delayed-commit queue would have paid, and avoiding it is one reason we analyze immediate commitment (Remark~\ref{rem:no_queue}).
+
+\paragraph{Thompson sampling in switching environments.}
+\citet{MellorShapiro2013} combine Thompson sampling with Bayesian online change-point detection. RA-TS differs by explicitly storing and matching recurring regimes rather than only adapting to changes.
+
+% =============================================================================
+\section{Problem Formulation}
+\label{sec:model}
+% =============================================================================
+
+Let $\Acal=\{1,\ldots,K\}$ be the set of arms. At each round $t\ge 1$ the learner selects $A_t\in\Acal$ and observes
+\begin{equation}
+    Y_t=\mu_{z_t,A_t}+\varepsilon_t,
+    \label{eq:reward_model}
+\end{equation}
+where $z_t\in\Rcal$ is the active hidden regime and $\Rcal$ is a finite set of distinct regimes.
+
+\paragraph{Reading the mathematics.}
+Three recurring technical phrases deserve a plain-word translation, once and for all. \emph{Sub-Gaussian noise with proxy $\sigma$} means: noise of typical size $\sigma$ whose large deviations are at least as unlikely as for a Gaussian --- inequality \eqref{eq:subgaussian_noise} below is the standard way of saying ``light tails''. \emph{Previsible} (equivalently, $\Fcal_{t-1}$-measurable) means: decided using only information available \emph{before} the round-$t$ reward is seen; this matters because the concentration inequalities we use (which say ``averages of many noise terms are small'') are only valid for sums whose composition was decided previsibly --- selecting which samples to average \emph{after} seeing their values can manufacture bias out of pure noise. \emph{Regret} is the total reward lost relative to an omniscient player who always knows the active regime and plays its best arm; it is the standard yardstick, and ``small regret'' means ``almost as good as if the regimes had been visible''.
+
+\paragraph{Filtration.}
+The regime sequence $(z_t)_{t\le T}$ is an unknown \emph{deterministic} sequence, fixed before the interaction starts (an oblivious environment). We work on a filtration $(\Fcal_t)_{t\ge0}$ in which $\Fcal_0$ contains the entire regime schedule $(z_t)_{t\le T}$ and all model parameters, and $\Fcal_t$ additionally contains the rewards $Y_1,\ldots,Y_t$, the actions $A_1,\ldots,A_t$, and the algorithm's internal randomization used up to and including the decision at round $t{+}1$. The algorithm, of course, never observes $z_t$; placing the schedule in $\Fcal_0$ is an analysis device that makes ``the true regime at round $t$'' a previsible quantity. The noise satisfies
+\begin{equation}
+    \E[\varepsilon_t\mid \Fcal_{t-1}]=0,
+    \qquad
+    \E[\exp(\lambda\varepsilon_t)\mid \Fcal_{t-1}]
+    \le \exp\!\big(\tfrac{\lambda^2\sigma^2}{2}\big)
+    \quad \forall \lambda\in\mathbb R,
+    \label{eq:subgaussian_noise}
+\end{equation}
+and $A_t$ is $\Fcal_{t-1}$-measurable.
+
+\paragraph{Episodes.}
+Time is partitioned into episodes $j=1,\ldots,G_T$ on the horizon $T$. Episode $j$ occupies $[\tau_j,\tau_{j+1})$, $\tau_1=1$, has regime $r_j\in\Rcal$ with $r_{j+1}\ne r_j$, and the same regime may occupy several non-consecutive episodes. For a regime $r$, its \emph{visits} are the episodes $j$ with $r_j=r$, and $T_r(T)=\sum_{t\le T}\one\{z_t=r\}$ is its cumulative lifetime.
+
+\subsection{Level and shape}
+
+For each regime $r$ write
+\begin{equation}
+    \mu_{r,k}=\ell_r+\theta_{r,k},
+    \qquad
+    \sum_{k=1}^K \theta_{r,k}=0,
+    \label{eq:level_shape_decomposition}
+\end{equation}
+with level $\ell_r$ and centered shape $\theta_r\in\mathbb R^K$. Define the centering operator $\phic(v)=v-\frac1K(\sum_k v_k)\one$, so $\phic(\mu_r)=\theta_r$. The optimal arm is $k^\star(r)\in\argmax_k\mu_{r,k}=\argmax_k\theta_{r,k}$; gaps are $\Delta_{r,k}=\mu_{r,k^\star(r)}-\mu_{r,k}$. Let
+\begin{equation}
+    B \;=\; \max_{r,r'\in\Rcal,\;k\in\Acal}\;\bigl|\mu_{r,k}-\mu_{r',k}\bigr|,
+    \qquad
+    \Delta_{\max} \;=\; \max_{r}\max_{k}\Delta_{r,k}.
+\end{equation}
+$B$ is the inter-regime spread; it bounds the mean shift of any contaminating sample.
+
+\subsection{Assumptions}
+
+\begin{assumption}[Shape separation]
+\label{ass:shape_separation}
+There exists $\dsh>0$ such that $\|\theta_r-\theta_{r'}\|_\infty\ge \dsh$ for all distinct $r,r'\in\Rcal$.
+\end{assumption}
+
+\begin{assumption}[Uniform change visibility]
+\label{ass:visible_changes}
+There exists $\eta_{\min}>0$ such that at every episode boundary, every arm's mean moves by at least $\eta_{\min}$:
+\begin{equation}
+    \bigl|\mu_{r_j,k}-\mu_{r_{j+1},k}\bigr|\;\ge\;\eta_{\min}
+    \qquad\text{for all } j<G_T \text{ and all } k\in\Acal .
+\end{equation}
+\end{assumption}
+
+\begin{remark}[On uniform visibility]
+\label{rem:visibility}
+Assumption~\ref{ass:visible_changes} is stronger than requiring visibility only on the previously committed arm. It is what makes the detection-delay proof unconditional on the post-change behaviour of Thompson sampling: whichever arm the algorithm plays after the change, the played arm's residual carries signal. It holds, for instance, whenever level differences dominate shape differences ($|\ell_r-\ell_{r'}|\ge\eta_{\min}+2\max_{r,k}|\theta_{r,k}|$). If visibility holds only for the arm $k^\star(r_j)$ committed before the change, the same delay bound holds with $d$ counting only \emph{plays of that arm}; converting this to a bound in rounds requires a high-probability lower bound on how often post-change Thompson sampling plays the previously best arm, which is empirically near-certain but which we do not formalize here.
+\end{remark}
+
+\begin{assumption}[Minimum dwell time]
+\label{ass:dwell_time}
+Every episode has length at least $m_{\min}\ge n_0K+d+1$, where $n_0$ is the probe length per arm and $d$ is the detection-delay bound of Theorem~\ref{thm:main}'s parameter system \eqref{eq:param_system}.
+\end{assumption}
+
+\proofguide{The dwell-time assumption removes probe straddling: on the good event every alarm occurs within $d$ rounds of the change, the subsequent $n_0K$-round probe then completes strictly inside the new episode, and no change occurs during a probe. Mixed probes are thereby excluded from the analysis; Section~\ref{sec:discussion} discusses what happens empirically when real data violates this.}
+
+The regret against the regime-aware oracle is
+\begin{equation}
+    \Reg_T=\sum_{t=1}^T\bigl(\mu_{z_t,k^\star(z_t)}-\mu_{z_t,A_t}\bigr).
+\end{equation}
+
+% =============================================================================
+\section{The RA-TS Algorithm}
+\label{sec:algorithm}
+% =============================================================================
+
+RA-TS maintains a library $\Lcal$ of entries. Entry $g$ stores per-arm counts and reward sums $(N_{g,k},S_{g,k})_{k\in\Acal}$; whenever $N_{g,k}>0$ for all $k$ define $\widehat\mu_{g,k}=S_{g,k}/N_{g,k}$ and $\widehat\theta_g=\phic(\widehat\mu_g)$. The algorithm has two modes.
+
+\paragraph{Acquire.}
+After initialization or an alarm, RA-TS plays the least-sampled arm of a fresh buffer until every arm has $n_0$ buffer samples (exactly $n_0K$ rounds). Let $\widehat\psi_k$ be the buffer mean of arm $k$ and $\widehat\xi=\phic(\widehat\psi)$ the buffer shape. Compute $D_g=\|\widehat\xi-\widehat\theta_g\|_\infty$ and $g^\star=\argmin_g D_g$. If $\Lcal\ne\emptyset$ and $D_{g^\star}\le\taum$, fold the entire buffer into entry $g^\star$ ($N_{g^\star,k}\mathrel{+}=n_0$, $S_{g^\star,k}\mathrel{+}=n_0\widehat\psi_k$) and enter Track on $g^\star$; otherwise create a new entry from the buffer and enter Track on it.
+
+\paragraph{Track.}
+With active entry $g$, at each round sample $\widetilde\mu_k\sim\mathcal N(m_{g,k},v_{g,k})$ independently across $k$ and play $A_t\in\argmax_k\widetilde\mu_k$, where
+\begin{equation}
+    v_{g,k}=\Bigl(\tau_0^{-2}+\tfrac{N_{g,k}}{\sigma^2}\Bigr)^{-1},
+    \qquad
+    m_{g,k}=v_{g,k}\Bigl(\tfrac{\mu_0}{\tau_0^2}+\tfrac{S_{g,k}}{\sigma^2}\Bigr),
+    \label{eq:posterior}
+\end{equation}
+with a fixed prior $\mathcal N(\mu_0,\tau_0^2)$, $\tau_0\ge\sigma$. In words: for each arm the algorithm holds a belief about its mean reward --- centered near the arm's running average $\widehat\mu_{g,k}$, with uncertainty $\sqrt{v_{g,k}}$ shrinking as the arm accumulates samples --- draws one random value per arm from these beliefs, and plays the arm whose draw is largest. Well-sampled good arms win almost always; rarely-sampled arms win occasionally because their uncertainty is wide. This is Thompson sampling: exploration emerges from the randomness of the draws, with no separate exploration schedule. A frozen baseline $b=\widehat\mu_g$ is stored when Track begins. After observing $Y_t$, the played-arm CUSUM is updated,
+\begin{equation}
+    G_{A_t}\leftarrow\max\{0,\;G_{A_t}+|Y_t-b_{A_t}|-\nu\},
+    \label{eq:cusum}
+\end{equation}
+(all $G_k$ are reset to $0$ when Track begins). If $G_{A_t}\ge h$ an \emph{alarm} is raised: the algorithm returns to Acquire and \emph{the alarm-triggering observation is not committed}. Otherwise the observation is committed immediately: $S_{g,A_t}\mathrel{+}=Y_t$, $N_{g,A_t}\mathrel{+}=1$.
+
+In words, the detector \eqref{eq:cusum} accumulates \emph{surprise}: each round it adds how far the observed reward fell from what the matched regime predicted for the played arm ($|Y_t-b_{A_t}|$), minus an allowance $\nu$ for ordinary noise. During stable operation the allowance exceeds the typical surprise, so the statistic keeps being pushed back to zero and rarely accumulates. After a genuine regime change the surprise systematically exceeds the allowance, so the statistic climbs at a steady rate and crosses the threshold $h$ within a bounded number of rounds. The baseline $b$ is deliberately \emph{frozen}: if it were a running average it would follow the drift and hide it.
+
+\begin{center}
+\fbox{\begin{minipage}{0.94\linewidth}
+\textbf{RA-TS (immediate commit, as implemented).}
+\begin{enumerate}[leftmargin=*]
+    \item Initialize $\Lcal=\emptyset$, mode $=$ Acquire, empty buffer.
+    \item \textbf{Acquire:} play the least-sampled arm until every arm has $n_0$ buffer samples.
+    \item Match the buffer shape to the nearest library shape; fold into it if the distance is at most $\taum$, else create a new entry. Enter Track; freeze the baseline $b=\widehat\mu_g$; reset $G\equiv0$.
+    \item \textbf{Track:} play by Thompson sampling \eqref{eq:posterior}; update the played-arm CUSUM \eqref{eq:cusum}; on alarm, discard the triggering observation and go to step 2; otherwise commit the observation to the active entry and repeat.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+
+Two implementation details matter for the analysis and are \emph{not} idealized away: observations are committed immediately (no queue), and the single alarm-triggering observation is discarded. Both are handled explicitly in Section~\ref{sec:events}.
+
+% =============================================================================
+\section{Parameter system and main theorem}
+\label{sec:main}
+% =============================================================================
+
+Fix a confidence level $\delta\in(0,1)$ and define the log factors
+\begin{equation}
+    L_1=\log\frac{12|\Rcal|KT^2}{\delta},
+    \qquad
+    L_2=\log\frac{12|\Rcal|KT^3}{\delta},
+    \qquad
+    L_3=\log\frac{12(K{+}1)T^2}{\delta}.
+    \label{eq:logs}
+\end{equation}
+Define the prefix radius, window radius, and impurity bias
+\begin{equation}
+    r(n)=\sigma\sqrt{\frac{2L_1}{n}},
+    \qquad
+    r_w(n)=\sigma\sqrt{\frac{2L_2}{n}},
+    \qquad
+    \eimp=\frac{dB+2\sigma\sqrt{2L_2 d}}{n_0}.
+    \label{eq:radii}
+\end{equation}
+The \emph{parameter system} is: there exist $\beta_0>0$ and $\gamma_0>0$ such that
+\begin{equation}
+\begin{aligned}
+&\text{(P1)}\quad \nu=\beta_0+\sigma\sqrt{2\ln 2},
+\qquad
+\gamma_0=\eta_{\min}-2\beta_0-2\sigma\sqrt{2\ln 2}>0,\\
+&\text{(P2)}\quad h=\frac{\sigma}{\sqrt{2\ln2}}\,L_3,
+\qquad
+d=\Bigl\lceil\frac{(K{+}1)h}{\gamma_0}\Bigr\rceil,\\
+&\text{(P3)}\quad n_0\ge d,
+\qquad
+\max\bigl\{r_w(n_0),\ \sqrt2\,r(n_0)+\eimp\bigr\}\le\beta_0,\\
+&\phantom{\text{(P3)}}\quad
+r_w(n_0)\le\frac{\dsh}{32},
+\qquad
+\sqrt2\,r(n_0)\le\frac{\dsh}{32},
+\qquad
+\eimp\le\frac{\dsh}{32},\\
+&\text{(P4)}\quad \taum=\frac{\dsh}{4},
+\qquad
+m_{\min}\ge n_0K+d+1 .
+\end{aligned}
+\label{eq:param_system}
+\end{equation}
+
+\begin{remark}[Feasibility and calibration order]
+\label{rem:feasibility}
+The system is solvable whenever $\eta_{\min}>2\sigma\sqrt{2\ln2}$, by the following order. Choose $\beta_0=\min\{\dsh/16,\ (\eta_{\min}-2\sigma\sqrt{2\ln2})/4\}$; then (P1) fixes $\nu$ and $\gamma_0\ge(\eta_{\min}-2\sigma\sqrt{2\ln2})/2>0$; (P2) fixes $h$ and $d$ without reference to $n_0$; finally (P3) is met by taking $n_0$ large enough, since $r(n_0),r_w(n_0)\to0$ and $\eimp\to0$ as $n_0\to\infty$ with $d$ fixed. Concretely $n_0=O\bigl(\sigma^2L_2/\dsh^2+(dB+\sigma\sqrt{L_2d})/\min\{\beta_0,\dsh\}\bigr)$ suffices. There is no circularity: $d$ depends on $(\beta_0,h,\gamma_0)$ only, and $n_0$ is chosen last. Constants throughout are explicit but not optimized.
+\end{remark}
+
+Define the impurity-induced \emph{tolerance}
+\begin{equation}
+    \etol
+    \;=\;
+    8\Bigl(\eimp+\frac{M_0}{n_0}\Bigr),
+    \qquad
+    M_0:=\frac{\sigma^2}{\tau_0^2}\,\max_{r,k}|\mu_0-\mu_{r,k}| .
+    \label{eq:tolerance}
+\end{equation}
+
+\begin{theorem}[Recurrence-aware regret, immediate commit]
+\label{thm:main}
+Suppose Assumptions \ref{ass:shape_separation}--\ref{ass:dwell_time} hold and the parameters satisfy \eqref{eq:param_system} with $\tau_0\ge\sigma$. There are universal constants $c_1,c_2$ such that
+\begin{equation}
+    \E[\Reg_T]
+    \;\le\;
+    \sum_{r\in\Rcal}\ \sum_{\substack{k\ne k^\star(r)\\ \Delta_{r,k}>\etol}}
+    \Bigl(
+    \frac{c_1\,\sigma^2 L_1}{\Delta_{r,k}}
+    +c_2\,\Delta_{r,k}
+    \Bigr)
+    \;+\;
+    \etol\,T
+    \;+\;
+    \Delta_{\max}\,G_T\,(n_0K+d)
+    \;+\;
+    \Delta_{\max}\,T\,\delta .
+    \label{eq:main_bound}
+\end{equation}
+\end{theorem}
+
+The four terms are: (i) the Thompson learning cost, paid once per \emph{distinct} regime and amortized over all its visits; (ii) the tolerance cost of impurity --- arms whose gap is below $\etol$ may be played indefinitely, each such round costing at most its own (small) gap; (iii) the per-episode overhead of one probe plus one detection delay; (iv) the confidence failure. A restart-based method pays (i) with $\Rcal$ replaced by the set of \emph{episodes}, i.e.\ $G_T$ full learning costs instead of $|\Rcal|$; that replacement is the recurrence dividend. The tolerance $\etol=O\bigl((dB+\sigma\sqrt{L_2 d}+M_0)/n_0\bigr)$ is the honest price of immediate commitment and vanishes as the probe grows; it plays the same role as an explicit optimality tolerance $\varepsilon_{\mathrm{opt}}$ in certification-based predecessors of this algorithm.
+
+\begin{remark}[The guarantee is not bounded total regret]
+The theorem does not state that total regret is uniformly bounded in $T$; that is false already for stationary bandits. The meaningful statement is that average regret vanishes when $G_T$ grows sublinearly and $n_0$ is calibrated so that $\etol\to0$.
+\end{remark}
+
+% =============================================================================
+\section{Probabilistic foundation: pools, windows, and the good event}
+\label{sec:events}
+% =============================================================================
+
+\proofguide{Everything probabilistic in the paper is concentrated in this section: five families of purely noise-based events whose intersection $\Ecal$ has probability at least $1-\delta$. All later arguments are \emph{deterministic on $\Ecal$}. The key difficulty of immediate commitment is that two selection mechanisms depend on realized values: (i) a completed probe buffer is folded into an entry chosen by \emph{matching}, which depends on the buffer's own noise; (ii) the alarm-triggering sample is discarded based on its own value. We neutralize (i) by defining concentration on \emph{pools} indexed by the true regime --- previsible thanks to $\Fcal_0$ containing the schedule --- and only later (in the master induction) showing that on $\Ecal$ the algorithm's assignments coincide with the pool structure. We neutralize (ii) by writing every entry statistic as a pool \emph{prefix minus a few short windows}, so that discarded or foreign samples are handled by window bounds rather than by sample-level selection.}
+
+\subsection{Pools and their previsibility}
+
+For each pair $(r,k)\in\Rcal\times\Acal$ define the \emph{pool} $\Pcal_{r,k}$ as the (random) increasing sequence of rounds
+\begin{equation}
+    \Pcal_{r,k}
+    =\bigl(t:\ A_t=k,\ z_t=r\bigr),
+\end{equation}
+i.e.\ all rounds at which arm $k$ is played while the true regime is $r$, in either mode. Because $A_t$ is $\Fcal_{t-1}$-measurable and $(z_t)\subseteq\Fcal_0$, the indicator $\one\{t\in\Pcal_{r,k}\}$ is $\Fcal_{t-1}$-measurable: pool membership is previsible. Write $\varepsilon^{(r,k)}_1,\varepsilon^{(r,k)}_2,\ldots$ for the noise variables of the successive pool elements and $M^{(r,k)}_n=\sum_{i\le n}\varepsilon^{(r,k)}_i$.
+
+Similarly, for each arm $k$ let $\Pcal_k=(t:A_t=k)$ be the play sequence of arm $k$ (previsible), and let $\Pcal_\ast=(1,2,\ldots,T)$ be all rounds.
+
+\subsection{The good event}
+
+\begin{definition}[Good event]
+\label{def:good_event}
+Let $\Ecal=\Ecal_1\cap\Ecal_2\cap\Ecal_3$ where, with $L_1,L_2,L_3$ from \eqref{eq:logs}:
+\begin{itemize}[leftmargin=1.4em]
+\item[$\Ecal_1$] (\emph{pool prefixes}): for every $(r,k)$ and every $1\le n\le T$,
+$\bigl|M^{(r,k)}_n\bigr|\le\sigma\sqrt{2nL_1}$.
+\item[$\Ecal_2$] (\emph{pool windows}): for every $(r,k)$ and every $0\le a<b\le T$,
+$\bigl|M^{(r,k)}_b-M^{(r,k)}_a\bigr|\le\sigma\sqrt{2(b-a)L_2}$.
+\item[$\Ecal_3$] (\emph{residual windows}): for every $s\in\{\ast,1,\ldots,K\}$ and every window $I$ of consecutive elements of $\Pcal_s$,
+\begin{equation}
+    \sum_{i\in I}\bigl(|\varepsilon_i|-\sigma\sqrt{2\ln2}\bigr)\;\le\;c_3
+    :=\frac{\sigma}{\sqrt{2\ln2}}\,L_3 .
+    \label{eq:E3}
+\end{equation}
+\end{itemize}
+\end{definition}
+
+\begin{lemma}[Probability of the good event]
+\label{lem:good_event}
+$\Pbb(\Ecal^c)\le\delta$.
+\end{lemma}
+
+\begin{proof}
+\emph{$\Ecal_1$.} Fix $(r,k)$ and $n$. The increments of $M^{(r,k)}$ are, conditionally on the past, mean-zero and $\sigma$-sub-Gaussian: if $t$ is the round of the $i$-th pool element, then $\one\{t\in\Pcal_{r,k}\}\in\Fcal_{t-1}$ and \eqref{eq:subgaussian_noise} holds. By the Azuma--Hoeffding inequality for martingales with conditionally sub-Gaussian increments (applied to the stopped process that freezes once the pool has fewer than $n$ elements; if the pool never reaches size $n$ the event is vacuous),
+$\Pbb\bigl(|M^{(r,k)}_n|>\sigma\sqrt{2nL_1}\bigr)\le 2e^{-L_1}$.
+A union bound over $|\Rcal|K$ pools and $n\le T$ gives
+$\Pbb(\Ecal_1^c)\le 2|\Rcal|KT e^{-L_1}\le\delta/3$ by \eqref{eq:logs} (the definition of $L_1$ contains the factor $12$, absorbing the constants).
+
+\emph{$\Ecal_2$.} Identical, applied to the martingale started at pool index $a$: for fixed $(r,k,a,b)$, $\Pbb\bigl(|M_b-M_a|>\sigma\sqrt{2(b-a)L_2}\bigr)\le2e^{-L_2}$; union over $|\Rcal|K$ pools and $\le T^2$ index pairs gives $\Pbb(\Ecal_2^c)\le\delta/3$.
+
+\emph{$\Ecal_3$.} Fix a sequence $s$ and a window $I$ with $|I|=m$. For $\lambda\ge0$,
+$\E[e^{\lambda|\varepsilon_t|}\mid\Fcal_{t-1}]\le\E[e^{\lambda\varepsilon_t}\mid\Fcal_{t-1}]+\E[e^{-\lambda\varepsilon_t}\mid\Fcal_{t-1}]\le2e^{\lambda^2\sigma^2/2}$.
+Hence, by iterating conditioning over the (previsible) window membership,
+\[
+\E\Bigl[\exp\Bigl(\lambda\sum_{i\in I}\bigl(|\varepsilon_i|-\sigma\sqrt{2\ln2}\bigr)\Bigr)\Bigr]
+\le\Bigl(2e^{\lambda^2\sigma^2/2-\lambda\sigma\sqrt{2\ln2}}\Bigr)^{m}.
+\]
+Choosing $\lambda=\sqrt{2\ln2}/\sigma$ makes the bracket equal $2e^{\ln2-2\ln2}=1$, so by Markov's inequality
+$\Pbb\bigl(\sum_{i\in I}(|\varepsilon_i|-\sigma\sqrt{2\ln2})\ge c_3\bigr)\le e^{-\lambda c_3}=e^{-L_3}$.
+Union over $K{+}1$ sequences and $\le T^2$ windows gives $\Pbb(\Ecal_3^c)\le\delta/3$.
+\end{proof}
+
+\begin{remark}[The good event in words]
+Each part of $\Ecal$ says one simple thing about the noise, uniformly over all the places the analysis will need it. $\Ecal_1$: for every regime--arm pair, the running average of the noise over the first $n$ relevant rounds is within $r(n)$ of zero, for every $n$ at once. $\Ecal_2$: the same holds for every \emph{contiguous stretch} of such rounds, not only stretches starting at the beginning --- this is what lets us excise or isolate short stretches (contaminated boundary samples, discarded samples, probe buffers) and still control their noise. $\Ecal_3$: over every contiguous stretch, the summed \emph{magnitudes} of the noise do not exceed their typical value by more than a fixed budget $c_3$; this single statement gives both ``the detector does not fire on pure noise'' and ``after a real change the detector must fire quickly''. No separate detector event is assumed. Lemma~\ref{lem:good_event} says all of this holds except with probability $\delta$.
+\end{remark}
+
+\subsection{Entry statistics as pool prefixes minus windows}
+
+The following deterministic bookkeeping identity is where immediate commitment is reconciled with previsible concentration. Fix a time $t$, an entry $g$ whose visits so far were all matched to episodes of one regime $\rho$ (this will be guaranteed inductively), and an arm $k$. Every sample committed to $(g,k)$ by time $t$ is either \emph{clean} ($z=\rho$ at its round) or \emph{dirty} ($z\ne\rho$). Let $V$ be the number of completed or ongoing visits of $g$.
+
+\begin{lemma}[Impure-mean deviation]
+\label{lem:impure_mean}
+On $\Ecal_1\cap\Ecal_2$, suppose that by time $t$: (i) the clean samples of $(g,k)$ form the prefix of $\Pcal_{\rho,k}$ up to some index, with at most $V$ excised stretches of at most $d$ consecutive pool elements each (samples of $\Pcal_{\rho,k}$ committed to a \emph{different} entry, or discarded); (ii) the dirty samples of $(g,k)$ form at most $V$ stretches of at most $d$ consecutive elements of pools $\Pcal_{r',k}$, $r'\neq\rho$; (iii) $N_{g,k}\ge n_0V$. Then
+\begin{equation}
+    \bigl|\widehat\mu_{g,k}-\mu_{\rho,k}\bigr|
+    \;\le\;
+    \sqrt2\,r(N_{g,k})+\eimp .
+    \label{eq:impure_mean}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Write $N=N_{g,k}$, and let $C$, $D$ be the clean and dirty index sets, $N=|C|+|D|$, $|D|\le dV$ by (ii). Then
+\[
+N\widehat\mu_{g,k}
+=\sum_{i\in C}\bigl(\mu_{\rho,k}+\varepsilon_i\bigr)
++\sum_{i\in D}\bigl(\mu_{z_i,k}+\varepsilon_i\bigr),
+\]
+so that
+\[
+N\bigl(\widehat\mu_{g,k}-\mu_{\rho,k}\bigr)
+=\underbrace{\sum_{i\in C}\varepsilon_i}_{(a)}
++\underbrace{\sum_{i\in D}\varepsilon_i}_{(b)}
++\underbrace{\sum_{i\in D}\bigl(\mu_{z_i,k}-\mu_{\rho,k}\bigr)}_{(c)} .
+\]
+\emph{(a).} By (i), $C=\{1,\ldots,n_{\mathrm{pre}}\}\setminus\bigcup_{v\le V}W_v$ in pool coordinates of $\Pcal_{\rho,k}$, where $n_{\mathrm{pre}}\le N+dV\le N(1+d/n_0)\le 2N$, using (iii) and $n_0\ge d$ from (P3). Hence
+\[
+\Bigl|\sum_{i\in C}\varepsilon_i\Bigr|
+\le\bigl|M^{(\rho,k)}_{n_{\mathrm{pre}}}\bigr|
++\sum_{v\le V}\Bigl|\sum_{i\in W_v}\varepsilon_i\Bigr|
+\le\sigma\sqrt{2\cdot2N\,L_1}+V\sigma\sqrt{2dL_2},
+\]
+using $\Ecal_1$ on the prefix and $\Ecal_2$ on each excised window ($|W_v|\le d$).
+\emph{(b).} $D$ consists of $\le V$ windows of length $\le d$ in pools $\Pcal_{r',k}$; by $\Ecal_2$, $|(b)|\le V\sigma\sqrt{2dL_2}$.
+\emph{(c).} $|(c)|\le|D|\,B\le dVB$.
+Combining and dividing by $N\ge n_0V$:
+\[
+\bigl|\widehat\mu_{g,k}-\mu_{\rho,k}\bigr|
+\le\frac{2\sigma\sqrt{NL_1}}{N}
++\frac{2V\sigma\sqrt{2dL_2}+dVB}{N}
+\le\sqrt2\,r(N)+\frac{2\sigma\sqrt{2dL_2}+dB}{n_0}
+=\sqrt2\,r(N)+\eimp . \qedhere
+\]
+\end{proof}
+
+In words, Lemma~\ref{lem:impure_mean} says: an entry's per-arm average is as accurate as if all its samples were clean --- the usual $1/\sqrt{N}$ error --- plus one \emph{fixed} extra error $\eimp$ caused by the contaminated boundary stretches. The key point is that $\eimp$ does not grow with the number of visits: each visit adds at most $d$ contaminated samples but also at least $n_0$ clean probe samples per arm, so the \emph{fraction} of contamination, and hence its bias, stays at the level $d/n_0$ forever. This single uniform bias is what every downstream argument (matching, detection, Thompson sampling) is asked to tolerate.
+
+\begin{lemma}[Probe-buffer deviation]
+\label{lem:buffer}
+On $\Ecal_2$, if a completed probe buffer lies entirely inside one episode with regime $r$ (guaranteed inductively), then for every arm $k$ its buffer mean satisfies $|\widehat\psi_k-\mu_{r,k}|\le r_w(n_0)$, and its shape satisfies $\|\widehat\xi-\theta_r\|_\infty\le 2r_w(n_0)$.
+\end{lemma}
+
+\begin{proof}
+The buffer's arm-$k$ samples are $n_0$ \emph{consecutive} elements of $\Pcal_{r,k}$ (during Acquire, arm $k$'s plays all enter the buffer, and the episode does not change under the inductive hypothesis), so $\Ecal_2$ gives $|\widehat\psi_k-\mu_{r,k}|\le\sigma\sqrt{2n_0L_2}/n_0=r_w(n_0)$. Centering at most doubles a sup-norm error: $\|\phic(u)-\phic(v)\|_\infty\le2\|u-v\|_\infty$.
+\end{proof}
+
+% =============================================================================
+\section{The master induction: matching, impurity, and the detector}
+\label{sec:master}
+% =============================================================================
+
+\proofguide{This is the structural heart of the paper. On the good event $\Ecal$, a single induction over the algorithm's phase transitions (probe completions and alarms) proves \emph{simultaneously}: probes never straddle episodes; matching is always correct; entries are in bijection with the regimes seen so far; impurity stays within budget; baselines are accurate; there are no false alarms; and every change is detected within $d$ rounds. These claims are interlocked --- matching correctness needs entry accuracy, which needs the impurity budget, which needs the delay bound, which needs baseline accuracy, which needs matching correctness --- and the induction is exactly the device that breaks the circle: each claim at stage $m$ only uses the other claims at stages $<m$.}
+
+\begin{lemma}[Master lemma]
+\label{lem:master}
+On $\Ecal$, under Assumptions \ref{ass:shape_separation}--\ref{ass:dwell_time} and the parameter system \eqref{eq:param_system}, the following hold for the entire horizon.
+\begin{enumerate}[leftmargin=1.8em,label=(M\arabic*)]
+\item\label{M1} Every completed probe lies inside a single episode, and every episode contains exactly one completed probe, which starts within $d+1$ rounds of the episode start (round 1 for the first episode).
+\item\label{M2} Every match decision is correct: a probe collected in an episode with regime $r$ is folded into the (unique) existing entry of $r$ if $r$ was seen before, and otherwise creates a new entry. Consequently entries are in bijection with distinct regimes seen so far; write $E_r$ for the entry of regime $r$ and $\rho(g)$ for the regime of entry $g$.
+\item\label{M3} (\emph{Bounded impurity}) At every time, entry $g$ with $V$ visits satisfies, for every arm $k$: $N_{g,k}\ge n_0V$; its dirty samples form at most $V$ stretches of at most $d$ consecutive pool elements; and its excised clean stretches (clean samples of $\rho(g)$ committed elsewhere or discarded) number at most $V$, each of length at most $d$. Hence Lemma~\ref{lem:impure_mean} applies:
+$|\widehat\mu_{g,k}-\mu_{\rho(g),k}|\le\sqrt2\,r(N_{g,k})+\eimp$ and
+$\|\widehat\theta_g-\theta_{\rho(g)}\|_\infty\le2\sqrt2\,r(n_0)+2\eimp$.
+\item\label{M4} At every Track entry the frozen baseline satisfies $\max_k|b_k-\mu_{\rho(g),k}|\le\beta_0$.
+\item\label{M5} No false alarm occurs: every alarm happens strictly after a true change, while the pre-change entry is still active.
+\item\label{M6} Every change is detected: if episode $j$ ends at $\tau_{j+1}$ while Track is active, an alarm occurs within $d$ rounds of $\tau_{j+1}$.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+Order the phase events (probe completions and alarms) chronologically and induct on this sequence; the inductive hypothesis is that \ref{M1}--\ref{M6} hold for all prior events.
+
+\emph{Base.} The first probe starts at $t=1$; by Assumption~\ref{ass:dwell_time}, $m_{\min}\ge n_0K+1$, so it completes inside episode~1: \ref{M1} holds for $P_1$. The library is empty, so a new entry is created --- vacuously correct matching \ref{M2}; it has $V=1$, no dirty samples, $N_{g,k}=n_0$: \ref{M3} holds. Its baseline error is, by Lemma~\ref{lem:buffer}, at most $r_w(n_0)\le\beta_0$ (P3): \ref{M4}.
+
+\emph{Inductive step, alarms.} Suppose Track is active on entry $g=E_{r_j}$ during episode $j$ (inductive \ref{M1}--\ref{M2}), with baseline error $\le\beta_0$ (\ref{M4}).
+
+\emph{No false alarm \ref{M5}.} Consider any round $t$ in episode $j$ while Track on $g$ is active, any arm $a$, and the CUSUM value $G_a(t)$. By construction $G_a(t)=\max_{I}\sum_{i\in I}(|e_i|-\nu)$, where the maximum ranges over trailing windows $I$ of $a$-plays since Track began. All these rounds are clean, so $|e_i|=|Y_i-b_a|\le|\varepsilon_i|+\beta_0$, whence by $\Ecal_3$ (sequence $\Pcal_a$) and (P1),
+\[
+\sum_{i\in I}(|e_i|-\nu)
+\le\sum_{i\in I}\bigl(|\varepsilon_i|-\sigma\sqrt{2\ln2}\bigr)
++|I|\bigl(\beta_0+\sigma\sqrt{2\ln2}-\nu\bigr)
+\le c_3 ,
+\]
+using (P1) for the middle term. Since (P2) sets $h=c_3$, we get $G_a(t)\le h$, with equality only on the boundary of the $\Ecal_3$ bound; to avoid the degenerate boundary case we calibrate the alarm threshold as $h:=c_3+\iota$ for an arbitrarily small $\iota>0$ and suppress $\iota$ from the notation. Hence no alarm fires during clean tracking: \ref{M5}.
+
+\emph{Detection \ref{M6}.} Let the episode end at $\tau=\tau_{j+1}$ with new regime $r'=r_{j+1}$, Track on $g$ still active. For any post-change round $t\in[\tau,\tau+D)$ with played arm $a$: $|e_t|=|\mu_{r',a}-b_a+\varepsilon_t|\ge|\mu_{r',a}-b_a|-|\varepsilon_t|\ge(\eta_{\min}-\beta_0)-|\varepsilon_t|$, using Assumption~\ref{ass:visible_changes} (\emph{every} arm shifted) and \ref{M4}. Each CUSUM satisfies $G_a\ge$ any trailing partial sum (since $G\mapsto\max\{0,G+z\}\ge G+z$), so summing over arms and using that each round contributes to exactly one arm's statistic,
+\[
+\sum_{a\in\Acal}G_a(\tau+D)
+\;\ge\;
+\sum_{t=\tau}^{\tau+D-1}\bigl(|e_t|-\nu\bigr)
+\;\ge\;
+D\bigl(\eta_{\min}-\beta_0-\nu\bigr)-\sum_{t=\tau}^{\tau+D-1}|\varepsilon_t| .
+\]
+By $\Ecal_3$ (sequence $\Pcal_\ast$, the window of the $D$ post-change rounds),
+$\sum|\varepsilon_t|\le D\sigma\sqrt{2\ln2}+c_3$, so
+\[
+\sum_a G_a(\tau+D)
+\ge D\bigl(\eta_{\min}-\beta_0-\nu-\sigma\sqrt{2\ln2}\bigr)-c_3
+= D\gamma_0'-c_3,
+\]
+with $\gamma_0':=\eta_{\min}-\beta_0-\nu-\sigma\sqrt{2\ln2}\ge\gamma_0$
+by (P1). If no alarm has fired by round $\tau+D-1$ then $\max_aG_a<h$, hence $D\gamma_0<Kh+c_3=(K{+}1)h$, i.e.\ $D<(K{+}1)h/\gamma_0\le d$ by (P2). Contrapositively an alarm fires within $d$ rounds of $\tau$: \ref{M6}. During those at most $d$ rounds, at most $d-1$ dirty samples are committed to $g$ (the triggering one is discarded), in one contiguous stretch per arm within the corresponding pools --- at most one stretch per pool of length $\le d$ per visit, maintaining \ref{M3} for $g$. Likewise, the first $\le d$ rounds of episode $j{+}1$ are, from the viewpoint of the future entry $E_{r'}$, one excised stretch of $\Pcal_{r',k}$ of length $\le d$ per arm: \ref{M3} bookkeeping for $E_{r'}$ is maintained.
+
+\emph{Inductive step, probes.} After the alarm (round $\le\tau+d$), Acquire runs for exactly $n_0K$ rounds. By Assumption~\ref{ass:dwell_time}, $\tau+d+n_0K<\tau+m_{\min}\le\tau_{j+2}$, so the probe completes inside episode $j{+}1$: \ref{M1}. For the match decision, by Lemma~\ref{lem:buffer} the buffer shape satisfies $\|\widehat\xi-\theta_{r'}\|_\infty\le2r_w(n_0)\le\dsh/16$ (P3). If $r'$ was seen before, its entry $E_{r'}$ exists and by inductive \ref{M3},
+$\|\widehat\theta_{E_{r'}}-\theta_{r'}\|_\infty\le2\sqrt2\,r(n_0)+2\eimp\le\dsh(2\sqrt2+2)/32\le\dsh/6$.
+Hence
+$D_{E_{r'}}\le\dsh/16+\dsh/6<\dsh/4=\taum$,
+while for any other entry $g'$ (regime $r''\ne r'$), by Assumption~\ref{ass:shape_separation} and the triangle inequality,
+$D_{g'}\ge\dsh-\dsh/16-\dsh/6>\dsh/2>\taum$.
+So $E_{r'}$ is the unique argmin and passes the threshold: the fold is correct. If $r'$ is new, every $D_{g'}>\taum$ as above, so a new entry is created: \ref{M2}. Folding adds $n_0$ clean samples per arm, so $N\ge n_0V$ is maintained and Lemma~\ref{lem:impure_mean}'s hypotheses continue to hold: \ref{M3}. The new baseline error is, by Lemma~\ref{lem:impure_mean} (now applicable), at most $\sqrt2\,r(n_0)+\eimp\le\beta_0$ (P3): \ref{M4}. The induction closes.
+\end{proof}
+
+\begin{corollary}
+\label{cor:structure}
+On $\Ecal$: the number of entries ever created is $|\Rcal_{\mathrm{seen}}|\le|\Rcal|$; each episode contributes at most $n_0K+d$ rounds outside Track-on-the-correct-entry (probe plus delay); and at every Track round of entry $g$, for every arm $k$,
+\begin{equation}
+    \bigl|m_{g,k}-\mu_{\rho(g),k}\bigr|
+    \;\le\;
+    \sqrt2\,r(N_{g,k})+\eimp+\frac{M_0}{n_0}
+    \;=\;
+    \sqrt2\,r(N_{g,k})+\tfrac18\etol ,
+    \label{eq:posterior_mean_bias}
+\end{equation}
+where $m_{g,k}$ is the posterior mean \eqref{eq:posterior}.
+\end{corollary}
+
+\begin{proof}
+Only \eqref{eq:posterior_mean_bias} needs comment: $m_{g,k}$ is a convex combination of $\widehat\mu_{g,k}$ (weight $N_{g,k}/(N_{g,k}+\sigma^2/\tau_0^2)$) and $\mu_0$; the prior contributes at most $(\sigma^2/\tau_0^2)|\mu_0-\mu_{\rho,k}|/N_{g,k}\le M_0/n_0$, and Lemma~\ref{lem:impure_mean} bounds the rest.
+\end{proof}
+
+% =============================================================================
+\section{Track-phase regret: Thompson sampling with bounded impurity}
+\label{sec:track}
+% =============================================================================
+
+\proofguide{On $\Ecal$, the Track rounds of entry $g$ form a single (interleaved but self-contained) decision process: the posterior of entry $g$ is influenced only by samples committed to $g$, and Corollary~\ref{cor:structure} bounds its bias at every round. We bound the number of Track pulls of each suboptimal arm by the classical three-way decomposition (under-sampled; sampled-but-lucky; blocked-by-pessimistic-best-arm), carrying the bias $\tfrac18\etol$ through every threshold. Only the third term requires a result we do not re-prove: the inverse-probability moment bound for Gaussian posteriors, stated as Fact~\ref{fact:invp} with its hypotheses verified for our setting. Arms with gaps at or below the tolerance $\etol$ are not resolved by this argument --- their posterior bias can exceed a constant fraction of their gap --- and are charged linearly; this is the honest cost of impurity.}
+
+Throughout this section fix a regime $r$ with entry $g=E_r$ (on $\Ecal$), write $\mu_k=\mu_{r,k}$, $\Delta_k=\Delta_{r,k}$, let $1$ denote $k^\star(r)$, and let $s=1,2,\ldots,S_g$ index the Track rounds of entry $g$ in order (\emph{all} of them, clean and dirty; $S_g\le T$). Let $N_k(s)$ be the total number of samples of $(g,k)$ committed before round $s$, write $\Fcal_{s-1}$ for the information available just before the round-$s$ posterior draw, and let $\theta_k(s)\sim\mathcal N(m_{g,k},v_{g,k})$ denote that draw for arm $k$.
+
+\begin{fact}[Inverse-probability moment bound; \citealp{AgrawalGoyal2013}, analysis of Gaussian Thompson sampling; see also \citealp{LattimoreSzepesvari2020}, Ch.~36]
+\label{fact:invp}
+Consider a sequence of rounds at which arm $1$'s statistic is $\mathcal N(m_1,v_1)$ with $v_1\in[\sigma^2/(2N_1),\sigma^2/N_1]$, where $N_1$ is the number of arm-$1$ samples and $m_1$ satisfies, at every round and for a fixed $\zeta>0$, the deviation bound $\Pbb(m_1\le\mu_1-\zeta-x)\le e^{-N_1x^2/(2\sigma^2)}$ for all $x\ge0$. Let $y\le\mu_1-2\zeta$ and let $p_j$ denote $\Pbb(\theta_1>y\mid\Fcal)$ evaluated at the rounds where $N_1=j$. Then there is a universal constant $C_0$ with
+\[
+\sum_{j=1}^{T}\E\Bigl[\frac{1-p_j}{p_j}\Bigr]
+\;\le\;
+C_0\Bigl(1+\frac{\sigma^2}{\zeta^2}\Bigr)\bigl(1+\log T\bigr).
+\]
+\end{fact}
+
+In words, Fact~\ref{fact:invp} addresses the one delicate phenomenon in any Thompson-sampling proof: could the algorithm get stuck playing a bad arm simply because the \emph{best} arm's estimate happens to look pessimistic? The quantity $p_j$ is the probability that the best arm's random draw clears a bar $y$ slightly below its true mean, and $1/p_j$ measures how ``blocked'' the best arm is. The Fact says the total expected blockage over the whole run is small --- logarithmic --- because a pessimistic estimate of the best arm is both unlikely (its average concentrates) and self-correcting (the posterior's spread keeps giving it chances). This is the standard engine of Thompson-sampling analyses and the only imported result in the paper.
+
+\begin{remark}[Hypotheses check]
+\label{rem:factcheck}
+In our setting $v_{g,1}=\sigma^2/(N_1+\sigma^2/\tau_0^2)\in[\sigma^2/(2N_1),\sigma^2/N_1]$ since $\tau_0\ge\sigma$ and $N_1\ge n_0\ge1$. The deviation hypothesis on $m_1$ holds with the \emph{fixed} offset $\zeta$ equal to the deterministic bias budget of Corollary~\ref{cor:structure} (impurity plus prior, at most $\tfrac18\etol$; the excised-window and dirty-noise corrections are deterministically inside this budget on $\Ecal_2$), while the fluctuating part --- the pool-prefix noise at count $N_1=j$ divided by $j$ --- satisfies the required tail bound $e^{-jx^2/(2\sigma^2)}$ at every fixed $j$ by Azuma's inequality, exactly the input used in the cited computation. The original argument is stated for i.i.d.\ samples of arm 1; it extends verbatim to previsibly selected samples because its only distributional inputs are this fixed-$j$ tail bound and the Gaussian form of the posterior, both of which hold here. Samples injected into arm 1 between decision rounds (probe folds, boundary contaminations) only \emph{advance} $j$, which is equivalent to skipping terms of the sum and can only decrease it. Finally, since the bias budget is guaranteed only on $\Ecal_2$, the Fact is formally applied to the process stopped at the first violation of $\Ecal_2$; off $\Ecal_2$ the pull count is bounded by $T$ and contributes at most $T\,\Pbb(\Ecal_2^c)\le T\delta/3$, absorbed into the failure term of Theorem~\ref{thm:main}.
+\end{remark}
+
+\begin{lemma}[Track pull bound]
+\label{lem:track}
+In the setting above, suppose the parameter system holds and $\Delta_k>\etol$. Then there are universal constants $c_1',c_2'$ with
+\[
+\E\bigl[\#\{s\le S_g:\ A_s=k\}\cdot\one_\Ecal\bigr]
+\;\le\;
+\frac{c_1'\,\sigma^2L_1}{\Delta_k^2}
++c_2'\bigl(1+\log T\bigr)\Bigl(1+\frac{\sigma^2}{\Delta_k^2}\Bigr).
+\]
+\end{lemma}
+
+\begin{proof}
+Since $\Delta_k>\etol=8(\eimp+M_0/n_0)$, Corollary~\ref{cor:structure} gives at every Track round
+\begin{equation}
+    |m_{g,k}-\mu_k|\le\sqrt2\,r(N_k)+\tfrac{\Delta_k}{8},
+    \qquad
+    |m_{g,1}-\mu_1|\le\sqrt2\,r(N_1)+\tfrac{\Delta_k}{8}.
+    \label{eq:bias_at_track}
+\end{equation}
+Set the thresholds $x_k=\mu_k+\tfrac{\Delta_k}{2}$ and $y_k=\mu_1-\tfrac{\Delta_k}{4}$, and
+$\ell_k=\bigl\lceil 1024\,\sigma^2L_1/\Delta_k^2\bigr\rceil$, so that $N_k\ge\ell_k$ implies $\sqrt2\,r(N_k)=2\sigma\sqrt{L_1/N_k}\le\Delta_k/16$. Decompose
+\begin{align*}
+\#\{A_s=k\}
+\;\le\;
+&\underbrace{\#\{A_s=k,\ N_k(s)<\ell_k\}}_{(a)}
++\underbrace{\#\{A_s=k,\ N_k(s)\ge\ell_k,\ \theta_k(s)>y_k\}}_{(b)}\\
+&+\underbrace{\#\{A_s=k,\ \theta_k(s)\le y_k\}}_{(c)} .
+\end{align*}
+
+\emph{(a)} Each such pull increments $N_k$, so $(a)\le\ell_k$ pathwise.
+
+\emph{(b)} On $\Ecal$, when $N_k\ge\ell_k$, \eqref{eq:bias_at_track} gives $m_{g,k}\le\mu_k+\Delta_k/16+\Delta_k/8<x_k$, and
+$y_k-m_{g,k}\ge(\mu_1-\Delta_k/4)-(\mu_k+3\Delta_k/16)=\Delta_k(1-\tfrac14-\tfrac3{16})=\tfrac{9}{16}\Delta_k$.
+The posterior standard deviation is at most $\sigma/\sqrt{N_k}\le\sigma/\sqrt{\ell_k}\le\Delta_k/(32\sqrt{L_1})$, so by the Gaussian tail bound,
+\[
+\Pbb\bigl(\theta_k(s)>y_k\mid\Fcal_{s-1}\bigr)
+\le\exp\Bigl(-\tfrac{(9\Delta_k/16)^2}{2\,\Delta_k^2/(1024L_1)}\Bigr)
+=\exp\bigl(-162\,L_1\bigr)\le\frac1T .
+\]
+Summing over $s\le T$: $\E[(b)\cdot\one_\Ecal]\le1$.
+
+\emph{(c)} This is the classical blocked term. Let $j$ index arm-1 samples and let $B_j$ be the (possibly empty) block of Track rounds during which $N_1=j$. The standard exchange argument \citep[Lemma~1]{AgrawalGoyal2013} applies unchanged: at any round $s\in B_j$, conditionally on $\Fcal_{s-}$ and on $\{\theta_k(s)\le y_k\ \forall k\ne1 \text{ playing a role}\}$, one has
+$\Pbb(A_s=1\mid\cdot)\ge\frac{p_j}{1-p_j}\,\Pbb(A_s=k,\ \theta_k(s)\le y_k\mid\cdot)$
+with $p_j=\Pbb(\theta_1(s)>y_k\mid\Fcal_{s-1})$ constant on the block (arm~1's posterior changes only when arm-1 samples arrive; probe folds and boundary contaminations of arm 1 merely terminate blocks, i.e.\ advance $j$). Summing over rounds and blocks,
+\[
+\E\bigl[(c)\bigr]\le\sum_{j=0}^{T}\E\Bigl[\frac{1-p_j}{p_j}\Bigr].
+\]
+We verify the hypotheses of Fact~\ref{fact:invp} with $\zeta=\Delta_k/8$: $y_k=\mu_1-\Delta_k/4=\mu_1-2\zeta$, and by \eqref{eq:bias_at_track} the fixed bias of $m_{g,1}$ is at most $\Delta_k/8=\zeta$ plus a sub-Gaussian fluctuation term with rate $N_1/(2\sigma^2)$ ($\Ecal_1$-type Azuma at fixed $j$; the factor $\sqrt2$ in \eqref{eq:bias_at_track} is absorbed by the constant in the Fact). Hence
+$\E[(c)]\le C_0(1+64\sigma^2/\Delta_k^2)(1+\log T)$.
+Collecting (a)+(b)+(c) proves the lemma.
+\end{proof}
+
+\begin{remark}[Arms inside the tolerance]
+\label{rem:tolerance_arms}
+If $\Delta_k\le\etol$ the argument above fails at exactly one point: the impurity bias $\tfrac18\etol$ need not be small relative to $\Delta_k$, so the posterior can permanently rank $k$ above $1$. No pull-count bound is possible in general. But each pull of such an arm costs at most $\Delta_k\le\etol$, so the total contribution over the horizon is at most $\etol\,T$. This term is the precise, provable form of the informal statement ``impurity acts as an optimality tolerance''.
+\end{remark}
+
+% =============================================================================
+\section{Proof of the main theorem}
+% =============================================================================
+
+\begin{proof}[Proof of Theorem~\ref{thm:main}]
+Split $\E[\Reg_T]=\E[\Reg_T\one_\Ecal]+\E[\Reg_T\one_{\Ecal^c}]$. Since one-round regret is at most $\Delta_{\max}$ and $\Pbb(\Ecal^c)\le\delta$ (Lemma~\ref{lem:good_event}), the second term is at most $\Delta_{\max}T\delta$.
+
+On $\Ecal$, partition the rounds by the master lemma. Each episode $j$ contributes: (i) at most $d$ post-change rounds before the alarm \ref{M6} (for $j\ge2$; these rounds' regret is at most $\Delta_{\max}$ each); (ii) exactly $n_0K$ probe rounds \ref{M1}; (iii) Track rounds on the correct entry $E_{r_j}$ \ref{M2}. Terms (i)--(ii) sum to at most $\Delta_{\max}G_T(n_0K+d)$ over the horizon.
+
+For (iii), fix a regime $r$ and collect the Track rounds of $E_r$ across all its visits. Rounds at which the played arm is $k^\star(r)$ incur no regret. For each suboptimal $k$ with $\Delta_{r,k}>\etol$, Lemma~\ref{lem:track} bounds the expected number of pulls on $\Ecal$; each costs $\Delta_{r,k}$, giving
+$\Delta_{r,k}\bigl(c_1'\sigma^2L_1/\Delta_{r,k}^2+c_2'(1+\log T)(1+\sigma^2/\Delta_{r,k}^2)\bigr)
+\le c_1\sigma^2L_1/\Delta_{r,k}+c_2\Delta_{r,k}+c_2\sigma^2(1+\log T)/\Delta_{r,k}$,
+absorbed into the first term of \eqref{eq:main_bound} after adjusting constants ($\log T\le L_1$). For arms with $\Delta_{r,k}\le\etol$, Remark~\ref{rem:tolerance_arms} charges at most $\etol$ per round; summed over all rounds of the horizon this is at most $\etol\,T$. Note that the dirty Track rounds (the delay windows) were already charged in (i); counting them again inside Lemma~\ref{lem:track}'s pull counts only weakens the bound, since the lemma counts \emph{all} Track pulls. Summing over $r\in\Rcal$ yields \eqref{eq:main_bound}.
+\end{proof}
+
+\begin{corollary}[Vanishing average regret]
+Treat the problem parameters ($K$, $|\Rcal|$, the gaps, $B$, $\sigma$, $\eta_{\min}$, $\dsh$) as fixed constants. Under the calibration of Remark~\ref{rem:feasibility}, $h,d=O(\log T)$ and $\etol=O\bigl((d/n_0)(B+\sigma\sqrt{\log T})\bigr)$; choosing $n_0=\Theta(d\log T)$ gives $\etol=O(1/\sqrt{\log T})\to0$ and $n_0=O(\log^2T)$. Then
+\[
+\E[\Reg_T]
+=O\bigl(\log T\bigr)
++o(T)
++O\bigl(G_T\log^2 T\bigr),
+\]
+up to problem-dependent constants, so $\E[\Reg_T]/T\to0$ whenever $G_T\log^2T=o(T)$.
+\end{corollary}
+
+% =============================================================================
+\section{Anytime version}
+\label{sec:anytime}
+% =============================================================================
+
+The fixed-horizon calibration enters only through the union bounds behind $\Ecal_1$--$\Ecal_3$ and through $h$. All are replaced by summable budgets. In $\Ecal_1$ give the pair $(n,\text{pool})$ the budget $\delta/(6|\Rcal|Kn^2)$, i.e.\ $r(n)=\sigma\sqrt{2\log(12|\Rcal|Kn^2/\delta)/n}$; in $\Ecal_2$ give the window $(a,b)$ the budget $\delta/(6|\Rcal|K\,b^2(b-a+1)^2)$; in $\Ecal_3$ give windows ending at global round $t$ the budget $\delta/(6(K{+}1)t^3)$, so $c_3$ and hence $h$ grow as $O(\sigma\log t)$; recompute $d_j$ from the $h$ in force at episode $j$. Then $\Pbb(\Ecal^c)\le\delta$ with no reference to $T$, and the master induction is unchanged because it is deterministic on $\Ecal$ and uses each bound only \emph{locally} (at the current $n$, window, or round). The conclusion of Theorem~\ref{thm:main} holds for every prefix $T$ simultaneously, with $n_0K+d$ replaced by $n_{0,j}K+d_j=O(K\log j+K\log\tau_{j+1})$ for episode $j$, and the corollary becomes: with probability $1-\delta$, simultaneously for all $T$,
+\[
+\Reg_T=O\Bigl(\sum_{r}\sum_{k\ne k^\star(r)}\frac{\sigma^2\log T}{\Delta_{r,k}}\Bigr)
++\etol T
++O\Bigl(K\sum_{j\le G_T}\log\tau_{j+1}\Bigr).
+\]
+\todo{If the anytime version is kept in the final paper, spell out the probe schedule $n_{0,j}$ (nondecreasing, recomputed at each Acquire from the budgets in force) and re-verify (P3) episode-wise; the argument is mechanical but the bookkeeping deserves its own subsection.}
+
+% =============================================================================
+\section{Experiments}
+% =============================================================================
+
+\todo{Port the empirical section from the working notes. Available and to be included: (i) two 7-day caches differing in switch rate; RA-TS-F attains regret 40.7/25.8 vs.\ 57.3/65.3 for the best certification-based predecessor and 96.0/84.0 for LI-TAR-UCB; (ii) the pure-TS ablation (no probe) stalls in Acquire (regret 147/152), the empirical counterpart of the probe-necessity discussion; (iii) the delayed-commit ablation (q=10) \emph{degrades} performance on the frequent-switch cache (25.8$\to$39.3) while reducing library size (9$\to$5) --- purity is real but the delayed-feedback cost dominates, supporting the design analyzed here; (iv) library-size trajectories showing creation saturates early.}
+
+% =============================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+% =============================================================================
+
+\begin{remark}[Why not delayed commit]
+\label{rem:no_queue}
+A delayed-commit queue achieves exact library purity, but (i) it makes the commit decision depend on future rewards, which breaks the previsibility used by every concentration argument in Section~\ref{sec:events} and induces a genuine selection bias --- discarded samples are precisely those with large residuals; (ii) it makes the acting posterior $q$ samples stale, a delayed-feedback cost \citep{JoulaniGyorgySzepesvari2013} that is real in experiments (see the ablation above); and (iii) it is unnecessary, as this paper shows. If exact purity is nevertheless desired (e.g.\ for interpretability of the library), a \emph{rollback} variant --- commit immediately, subtract the last $\le d$ committed samples upon alarm --- achieves purity with no steady-state staleness; its analysis needs the same window devices as Section~\ref{sec:events} and inherits the same theorem with $\eimp$ replaced by a smaller remainder. We do not pursue it because the empirical gain is negligible.
+\end{remark}
+
+\begin{remark}[What the assumptions exclude]
+Uniform visibility (Assumption~\ref{ass:visible_changes}) excludes changes that leave some arm's mean fixed; a played-arm-only version is discussed in Remark~\ref{rem:visibility}. The dwell-time assumption excludes probe straddling; empirically, straddled probes create a bounded number of spurious library entries which the detector subsequently quarantines (they stop being matched), and library creation saturates early --- but the clean statement of \ref{M2} fails, and extending the master induction to tolerate straddles (allowing at most one extra entry and one extra acquire cycle per short episode) is the natural next step. Finally, the tolerance term $\etol T$ is unavoidable at this level of generality: an adversary may place a regime's second-best arm within $\etol$ of the best, and $d$ committed foreign samples per visit can permanently reverse their empirical order.
+\end{remark}
+
+\begin{remark}[Constants and looseness]
+The constants in \eqref{eq:param_system} (e.g.\ $32$, $\sqrt{2\ln2}$, the factor $8$ in $\etol$) come from the crude union bounds and triangle inequalities used to keep every proof short; none is tight. The structural content --- learning per distinct regime, overhead per episode, tolerance proportional to $d/n_0$ --- is what the theorem is for.
+\end{remark}
+
+% =============================================================================
+\section{Conclusion}
+% =============================================================================
+
+RA-TS exploits recurrence in piecewise-stationary bandits with three mechanisms: probe-and-match identification, a resumed per-regime posterior, and a played-arm change detector. We analyzed the algorithm exactly as implemented, with immediate commitment, replacing the library-purity idealization by a bounded-impurity analysis: contamination is confined to detection-delay windows, its effect on every statistic is a uniformly bounded bias, and the bias is carried through matching, detection, and Thompson sampling at the price of constant-factor margins and an explicit tolerance term. The resulting bound separates the cost of learning distinct regimes ($|\Rcal|$ logarithmic terms) from the cost of tracking switches ($G_T$ bounded overheads), which is the recurrence dividend, and quantifies the price of realism ($\etol T$, vanishing in the probe length).
+
+% =============================================================================
+% Bibliography
+% =============================================================================
+
+\begin{thebibliography}{99}
+
+\bibitem[Agrawal and Goyal(2013)]{AgrawalGoyal2013}
+Shipra Agrawal and Navin Goyal.
+\newblock Further optimal regret bounds for Thompson sampling.
+\newblock In \emph{Proceedings of the Sixteenth International Conference on Artificial Intelligence and Statistics}, volume 31 of PMLR, pages 99--107, 2013.
+
+\bibitem[Besson et~al.(2022)]{BessonKaufmannMaillardSeznec2022}
+Lilian Besson, Emilie Kaufmann, Odalric-Ambrym Maillard, and Julien Seznec.
+\newblock Efficient change-point detection for tackling piecewise-stationary bandits.
+\newblock \emph{Journal of Machine Learning Research}, 23(77):1--40, 2022.
+
+\bibitem[Garivier and Moulines(2011)]{GarivierMoulines2011}
+Aur\'elien Garivier and Eric Moulines.
+\newblock On upper-confidence bound policies for switching bandit problems.
+\newblock In \emph{Algorithmic Learning Theory}, pages 174--188. Springer, 2011.
+
+\bibitem[Gupta et~al.(2019)]{GuptaKorenTalwar2019}
+Anupam Gupta, Tomer Koren, and Kunal Talwar.
+\newblock Better algorithms for stochastic bandits with adversarial corruptions.
+\newblock In \emph{Proceedings of the 32nd Conference on Learning Theory}, PMLR 99, pages 1562--1578, 2019.
+
+\bibitem[Joulani et~al.(2013)]{JoulaniGyorgySzepesvari2013}
+Pooria Joulani, Andr\'as Gy\"orgy, and Csaba Szepesv\'ari.
+\newblock Online learning under delayed feedback.
+\newblock In \emph{Proceedings of the 30th International Conference on Machine Learning}, PMLR 28, pages 1453--1461, 2013.
+
+\bibitem[Kaufmann et~al.(2012)]{KaufmannKordaMunos2012}
+Emilie Kaufmann, Nathaniel Korda, and R\'emi Munos.
+\newblock Thompson sampling: An asymptotically optimal finite-time analysis.
+\newblock In \emph{Algorithmic Learning Theory}, pages 199--213. Springer, 2012.
+
+\bibitem[Lattimore and Szepesv\'ari(2020)]{LattimoreSzepesvari2020}
+Tor Lattimore and Csaba Szepesv\'ari.
+\newblock \emph{Bandit Algorithms}.
+\newblock Cambridge University Press, 2020.
+
+\bibitem[Liu et~al.(2018)]{LiuLeeShroff2018}
+Fang Liu, Joohyun Lee, and Ness Shroff.
+\newblock A change-detection based framework for piecewise-stationary multi-armed bandit problem.
+\newblock In \emph{Proceedings of the 32nd AAAI Conference on Artificial Intelligence}, 2018.
+
+\bibitem[Lykouris et~al.(2018)]{LykourisMirrokniPaesLeme2018}
+Thodoris Lykouris, Vahab Mirrokni, and Renato Paes~Leme.
+\newblock Stochastic bandits robust to adversarial corruptions.
+\newblock In \emph{Proceedings of the 50th Annual ACM Symposium on Theory of Computing}, pages 114--122, 2018.
+
+\bibitem[Maillard and Mannor(2014)]{MaillardMannor2014}
+Odalric-Ambrym Maillard and Shie Mannor.
+\newblock Latent bandits.
+\newblock In \emph{Proceedings of the 31st International Conference on Machine Learning}, volume 32 of PMLR, pages 136--144, 2014.
+
+\bibitem[Mellor and Shapiro(2013)]{MellorShapiro2013}
+Joseph Mellor and Jonathan Shapiro.
+\newblock Thompson sampling in switching environments with Bayesian online change detection.
+\newblock In \emph{Proceedings of the Sixteenth International Conference on Artificial Intelligence and Statistics}, volume 31 of PMLR, pages 442--450, 2013.
+
+% TODO: verify the author list of Routine Bandits against the ECML-PKDD 2021 record.
+% The previous draft listed "Hussein Saber, Odalric-Ambrym Maillard, Pierre-Alain Fouque",
+% which appears incorrect (P.-A. Fouque is a cryptographer). Believed correct:
+% Hassan Saber, L\'eo Saci(?), Odalric-Ambrym Maillard, Audrey Durand(?).
+\bibitem[Saber et~al.(2021)]{SaberEtAl2021}
+Hassan Saber, Odalric-Ambrym Maillard, et~al.
+\newblock Routine bandits: Minimizing regret on recurring problems.
+\newblock In \emph{Machine Learning and Knowledge Discovery in Databases. Research Track}, ECML PKDD 2021, Lecture Notes in Computer Science. Springer, 2021.
+
+\end{thebibliography}
+
+\end{document}

@@ -371,11 +371,18 @@ filtering each error/control signal \emph{continuously} (the band-pass filter
 state is carried across the run; the lowest band, $0.05$--$0.3$\,Hz, carries the
 largest weight and requires this), and the reward of Eq.~\eqref{eq:zreward} is
 the mean over \SI{2}{s} blocks. Statistics are accumulated over five independent
-noise realisations of \SI{360}{s} each (a \SI{60}{s} filter warm-up discarded;
-$\sim$\,$750$ settled blocks per cell). Table~\ref{tab:reward} reports the mean
-raw and logistic-mapped reward; Fig.~\ref{fig:reward} shows both the full
-per-controller reward \emph{distributions} in each regime (top) and the mean
-logistic (bandit-space) reward with error bars (bottom).
+noise realisations (seeds) of \SI{360}{s} each; discarding a \SI{60}{s} filter
+warm-up per realisation leaves $149$ settled \SI{2}{s} blocks per seed, $745$
+pooled per cell in total. This pooled set of $745$ per-cell blocks is what the
+histograms of Fig.~\ref{fig:reward} (top) show. Because the $149$ blocks within
+one realisation come from a continuously-stateful filter, consecutive blocks
+are autocorrelated and cannot be treated as independent draws for an error
+estimate; we therefore first average the $149$ blocks of each realisation down
+to a single per-seed mean reward, and report the bar heights and error bars of
+Fig.~\ref{fig:reward} (bottom) as the mean and standard error \emph{of those
+five per-seed means} (five genuinely independent samples), not of the $745$
+raw blocks. Table~\ref{tab:reward} reports the corresponding mean raw and
+logistic-mapped reward.
 
 \begin{table}[t]
   \centering
@@ -400,17 +407,22 @@ logistic (bandit-space) reward with error bars (bottom).
   \centering
   \includegraphics[width=\linewidth]{figs/reward_landscape.png}
   \caption{Reward landscape. \emph{Top:} per-controller distributions of the
-  raw reward score (\SI{2}{s} blocks, continuous-filter convention), one panel
-  per regime. The distributions are broad and strongly overlapping---the
-  per-block noise is far larger than the mean separations---so a single
-  observation carries little information about the acting regime or the best
-  controller; only window-averaging and accumulation across windows resolve the
-  ordering. The regime signatures are visible: in $R_0$ the ordering
-  $\Cz\!>\!\Co\!>\!\Ct$ shows as a rightward shift of $\Cz$ (blue); in $R_1$ all
-  three nearly coincide; in $R_2$ the ordering reverses, with $\Cz$ shifted
-  left. \emph{Bottom:} mean logistic (bandit-space) reward per regime and
-  controller; error bars are the standard error of the mean over the five
-  independent noise realisations. The diagonal (regime-optimal) controller is
+  raw reward score, one panel per regime, pooling all $745$ settled \SI{2}{s}
+  blocks per (regime, controller) cell ($149$ blocks $\times$ $5$ independent
+  noise realisations; continuous-filter convention). The distributions are
+  broad and strongly overlapping---the per-block noise is far larger than the
+  mean separations---so a single observation carries little information about
+  the acting regime or the best controller; only window-averaging and
+  accumulation across windows resolve the ordering. The regime signatures are
+  visible: in $R_0$ the ordering $\Cz\!>\!\Co\!>\!\Ct$ shows as a rightward
+  shift of $\Cz$ (blue); in $R_1$ all three nearly coincide; in $R_2$ the
+  ordering reverses, with $\Cz$ shifted left. \emph{Bottom:} mean logistic
+  (bandit-space) reward per regime and controller; bar heights and error bars
+  are the mean and standard error \emph{of the five per-seed mean rewards}
+  (one mean per $149$-block realisation), not of the $745$ pooled blocks
+  shown above---the blocks within a realisation are autocorrelated (continuous
+  filtering) and only the five realisations themselves are independent. The
+  diagonal (regime-optimal) controller is
   largest in each regime and the reward is non-saturating (all $0.31$--$0.60$),
   but the separations are regime-dependent: large in $R_0$, small in $R_1$, and
   marginal in $R_2$ where $\Co$ and $\Ct$ are statistically indistinguishable

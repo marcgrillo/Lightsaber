@@ -371,18 +371,23 @@ filtering each error/control signal \emph{continuously} (the band-pass filter
 state is carried across the run; the lowest band, $0.05$--$0.3$\,Hz, carries the
 largest weight and requires this), and the reward of Eq.~\eqref{eq:zreward} is
 the mean over \SI{2}{s} blocks. Statistics are accumulated over five independent
-noise realisations (seeds) of \SI{360}{s} each; discarding a \SI{60}{s} filter
-warm-up per realisation leaves $149$ settled \SI{2}{s} blocks per seed, $745$
-pooled per cell in total. This pooled set of $745$ per-cell blocks is what the
-histograms of Fig.~\ref{fig:reward} (top) show. Because the $149$ blocks within
-one realisation come from a continuously-stateful filter, consecutive blocks
-are autocorrelated and cannot be treated as independent draws for an error
-estimate; we therefore first average the $149$ blocks of each realisation down
-to a single per-seed mean reward, and report the bar heights and error bars of
+noise realisations (seeds) of \SI{360}{s} each. The band filters, run
+continuously from $t=0$, take time to reach their steady-state response, so
+each realisation's first \SI{60}{s} (its filter \emph{transient}) are discarded
+and only the remaining, \emph{settled} blocks---those computed once the
+filters' output no longer depends on their arbitrary start-up condition---are
+kept: $149$ settled \SI{2}{s} blocks per realisation, $745$ pooled over the
+five realisations for each (regime, controller) combination. This pooled set
+of $745$ blocks is what the histograms of Fig.~\ref{fig:reward} (top) show.
+Because the $149$ blocks within one realisation come from that same
+continuously-running filter, consecutive blocks are autocorrelated and cannot
+be treated as independent draws for an error estimate; we therefore first
+average the $149$ blocks of each realisation down to a single per-realisation
+mean reward, and report the bar heights and error bars of
 Fig.~\ref{fig:reward} (bottom) as the mean and standard error \emph{of those
-five per-seed means} (five genuinely independent samples), not of the $745$
-raw blocks. Table~\ref{tab:reward} reports the corresponding mean raw and
-logistic-mapped reward.
+five per-realisation means} (five genuinely independent samples), not of the
+$745$ raw blocks. Table~\ref{tab:reward} reports the corresponding mean raw
+and logistic-mapped reward.
 
 \begin{table}[t]
   \centering
@@ -408,8 +413,11 @@ logistic-mapped reward.
   \includegraphics[width=\linewidth]{figs/reward_landscape.png}
   \caption{Reward landscape: the same data at two levels of averaging.
   \emph{Top:} distribution of \emph{individual} \SI{2}{s}-block raw scores per
-  controller and regime ($745$ blocks per cell $=$ $5$ independent \SI{360}{s}
-  noise realisations $\times$ $149$ settled blocks each). \emph{Bottom:} each
+  controller and regime. Each panel pools $745$ blocks per controller: $5$
+  independent \SI{360}{s} noise realisations, each contributing $149$
+  \emph{settled} blocks (i.e.\ computed after discarding the first \SI{60}{s},
+  during which the continuously-running band filters are still in their
+  start-up transient). \emph{Bottom:} each
   realisation is reduced to its mean reward (in the logistic bandit space);
   bars show the average of the five realisation means, error bars their
   standard error. The contrast between the broad histograms and the small

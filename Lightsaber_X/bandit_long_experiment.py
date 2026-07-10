@@ -382,11 +382,11 @@ def main():
         print(f"[exp] {name:11s}: cum={h['rewards'].sum():.1f}  mean={h['rewards'].mean():.4f}  "
               f"switches={sw}  ({h['wall_s']:.0f}s)", flush=True)
 
-    write_outputs(outdir, results, cache, oracle_table, args.hold)
+    write_outputs(outdir, results, cache, oracle_table, args.hold, sigma)
     print(f"\n[exp] saved to {outdir}")
 
 
-def write_outputs(outdir, results, cache, oracle_table, hold):
+def write_outputs(outdir, results, cache, oracle_table, hold, sigma):
     N = int(cache['N']); fs = FS
     hold_n = int(hold * fs)
     Wsec = np.asarray(cache['Wsec']); tsec = np.asarray(cache['tsec'])
@@ -394,20 +394,33 @@ def write_outputs(outdir, results, cache, oracle_table, hold):
     # int64: ndec*hold_n exceeds int32 beyond ~97 days (np.arange defaults to int32 on Windows)
     dec_t = (np.arange(ndec, dtype=np.int64) * hold_n) / fs
     Wdec = np.vstack([np.interp(dec_t, tsec, Wsec[i]) for i in range(3)])     # (3, ndec)
-    opt_arm = np.argmax(oracle_table @ Wdec, axis=0)                          # (ndec,)
+    exp_r = oracle_table @ Wdec                                              # (arm, ndec) expected reward
+    best_r = exp_r.max(axis=0)                                               # per-decision best achievable
+    opt_arm = np.argmax(exp_r, axis=0)                                       # (ndec,)
+    # NEAR-optimal: played arm's expected-reward gap to the best <= eps_near. Because two
+    # controllers are near-tied in some regimes (e.g. C1 vs C2 in R2, gap ~0.005), a strict
+    # optimal-arm count penalises harmless choices; the near-optimal fraction counts a window
+    # as a "hit" whenever the per-window regret is below half the reward noise, so it tracks
+    # regret rather than contradicting it. eps_near = 0.5*sigma (~0.021 here) sits well below
+    # every costly confusion (gaps >= 0.08) and above the genuine near-ties.
+    eps_near = 0.5 * float(sigma)
+
+    def near_opt_frac(a):
+        return float(np.mean(best_r - exp_r[a, np.arange(len(a))] <= eps_near))
     sev = 1.0 * Wdec[1] + 2.0 * Wdec[2]
 
     # summary
     oracle_cum = results['Oracle']['rewards'][:ndec].sum() if 'Oracle' in results else np.nan
     with open(os.path.join(outdir, "summary.csv"), "w") as f:
-        f.write("policy,cum_reward,mean_reward,regret_vs_oracle,switches,frac_optimal\n")
+        f.write("policy,cum_reward,mean_reward,regret_vs_oracle,switches,frac_optimal,frac_near_optimal\n")
         for name, v in results.items():
             r = v['rewards'][:ndec]; a = v['arms'][:ndec]
-            frac = float(np.mean(a == opt_arm))
+            frac = float(np.mean(a == opt_arm)); fnear = near_opt_frac(a)
             sw = int((np.diff(v['arms']) != 0).sum())
-            f.write(f"{name},{r.sum():.3f},{r.mean():.4f},{oracle_cum - r.sum():.3f},{sw},{frac:.3f}\n")
+            f.write(f"{name},{r.sum():.3f},{r.mean():.4f},{oracle_cum - r.sum():.3f},{sw},{frac:.3f},{fnear:.3f}\n")
     # console table
-    print(f"\n{'policy':12s} {'cum_reward':>11s} {'regret':>9s} {'frac_opt':>9s} {'switches':>9s}")
+    print(f"\n[near-optimal threshold eps = {eps_near:.4f} = 0.5*sigma]")
+    print(f"{'policy':12s} {'cum_reward':>11s} {'regret':>9s} {'frac_opt':>9s} {'near_opt':>9s} {'switches':>9s}")
     order = [n for n in ["Oracle", "RA-TS-FR", "RA-TS-FQ", "RA-TS-F", "RA-TS", "CG-ICLB-R2",
                          "CG-ICLB-R", "CG-ICLB-TT", "CG-ICLB-TS", "CG-ICLB", "LI-TAR-UCB",
                          "TAR-UCB", "Thompson", "D-UCB", "Rule-based", "Fixed-C0", "Fixed-C1",
@@ -416,7 +429,7 @@ def write_outputs(outdir, results, cache, oracle_table, hold):
     for name in order:
         v = results[name]; r = v['rewards'][:ndec]; a = v['arms'][:ndec]
         print(f"{name:12s} {r.sum():11.1f} {oracle_cum - r.sum():9.1f} "
-              f"{np.mean(a==opt_arm):9.3f} {int((np.diff(v['arms'])!=0).sum()):9d}")
+              f"{np.mean(a==opt_arm):9.3f} {near_opt_frac(a):9.3f} {int((np.diff(v['arms'])!=0).sum()):9d}")
 
     # fig 1: cumulative reward + regret vs oracle
     fig, ax = plt.subplots(1, 2, figsize=(14, 5))
@@ -469,11 +482,13 @@ def write_outputs(outdir, results, cache, oracle_table, hold):
     summ = {name: dict(cum=float(v['rewards'][:ndec].sum()),
                        mean=float(v['rewards'][:ndec].mean()),
                        switches=int((np.diff(v['arms']) != 0).sum()),
-                       frac_opt=float(np.mean(v['arms'][:ndec] == opt_arm)))
+                       frac_opt=float(np.mean(v['arms'][:ndec] == opt_arm)),
+                       frac_near_opt=near_opt_frac(v['arms'][:ndec]))
             for name, v in results.items()}
     with open(os.path.join(outdir, "summary.json"), "w") as f:
         json.dump(dict(horizon_s=float(cache['horizon']), ndec=int(ndec), hold=hold,
-                       oracle_table=oracle_table.tolist(), policies=summ), f, indent=2)
+                       eps_near=float(eps_near), oracle_table=oracle_table.tolist(),
+                       policies=summ), f, indent=2)
 
 
 if __name__ == "__main__":

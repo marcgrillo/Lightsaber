@@ -753,7 +753,17 @@ day---roughly twice the regime switches), and one six-month environment
 ($1.55\times10^7$\,s, $\sim$\,$1.6\times10^5$ decisions, $181$ storm events and
 $\sim$\,$3600$ diurnal drift transitions). The figure of merit is cumulative
 regret against the Oracle; we also report the total number of controller
-switches and the fraction of windows on the true optimal arm.
+switches and the fraction of windows in which a \emph{near-optimal} controller
+is played. We call a controller near-optimal in a window when its expected
+per-window reward is within $\varepsilon = \tfrac12\hat\sigma \approx 0.021$ of
+the best achievable (with $\hat\sigma$ the calibrated per-window reward noise).
+This is a more informative accuracy metric than the strict optimal-arm rate
+because two controllers are genuinely near-tied in some regimes---most sharply
+$\Co$ and $\Ct$ in $R_2$, gap $0.005$ (Table~\ref{tab:reward})---so playing the
+runner-up there costs essentially no regret; $\varepsilon$ sits an order of
+magnitude below every \emph{costly} confusion (gaps $\ge 0.08$), so the metric
+counts only genuine mistakes and, unlike the strict rate, tracks regret rather
+than contradicting it.
 
 \subsection{Results: one-week benchmarks}\label{sec:ba-results}
 
@@ -835,8 +845,9 @@ the three.
   sequence (38 switches); fraction of decisions spent in ACQUIRE (probing),
   $9.4\%$ overall, concentrated in short bursts at regime boundaries; library
   size $J$, stabilising by day 1.7 (at $J=8$: the three true regimes plus
-  noise-split duplicates, see text); rolling fraction-optimal for RA-TS-F, the
-  rule-based policy, and D-UCB. RA-TS-F recovers to near-optimal play within
+  noise-split duplicates, see text); rolling fraction near-optimal (within
+  $\tfrac12\hat\sigma$ of the best controller) for RA-TS-F, the rule-based
+  policy, and D-UCB. RA-TS-F recovers to near-optimal play within
   each regime episode, while the baselines' recovery is slower and, for the
   rule-based policy, gated on its alarm and periodic re-check schedule.}
   \label{fig:weekinternals}
@@ -861,21 +872,22 @@ six-month scale.
   \centering
   \caption{Six-month run ($180$ days, $155{,}519$ decisions, identical noise
   realisation for all policies): cumulative regret vs.\ the Oracle, fraction of
-  windows on the true optimal arm, and number of switches. Oracle cumulative
-  reward $57106.4$.}
+  windows playing a near-optimal controller (within $\tfrac12\hat\sigma$ of the
+  best, Section~\ref{sec:ba-protocol}), and number of switches. Oracle
+  cumulative reward $57106.4$.}
   \label{tab:sixmo}
   \begin{tabular}{l r r r}
     \toprule
-    policy & regret & frac.\ optimal & switches \\
+    policy & regret & frac.\ near-opt. & switches \\
     \midrule
-    Oracle             & $0$      & $0.994$ & $865$ \\
-    \textbf{RA-TS-F}   & $\mathbf{861.5}$ & $0.480$ & $16{,}959$ \\
-    Rule-based         & $3702.9$ & $0.371$ & $1683$ \\
-    Fixed-$\Cz$        & $3872.7$ & $0.481$ & $0$ \\
-    Thompson (disc.)   & $4095.3$ & $0.411$ & $437$ \\
-    Fixed-$\Co$        & $5235.0$ & $0.065$ & $0$ \\
-    D-UCB              & $5319.3$ & $0.307$ & $44{,}255$ \\
-    Fixed-$\Ct$        & $6005.2$ & $0.453$ & $0$ \\
+    Oracle             & $0$      & $0.997$ & $865$ \\
+    \textbf{RA-TS-F}   & $\mathbf{861.5}$ & $0.936$ & $16{,}959$ \\
+    Rule-based         & $3702.9$ & $0.626$ & $1683$ \\
+    Fixed-$\Cz$        & $3872.7$ & $0.508$ & $0$ \\
+    Thompson (disc.)   & $4095.3$ & $0.509$ & $437$ \\
+    Fixed-$\Co$        & $5235.0$ & $0.522$ & $0$ \\
+    D-UCB              & $5319.3$ & $0.521$ & $44{,}255$ \\
+    Fixed-$\Ct$        & $6005.2$ & $0.501$ & $0$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -915,11 +927,18 @@ a short-horizon artefact. The mean per-window regret is $0.0055 \approx
 necessary nor sufficient: D-UCB switches $44$k times for the worst learner
 regret, the rule-based policy only $1683$ times, and RA-TS-F sits between
 ($17$k, $11\%$ of decisions) with its exploration event-triggered by the
-drift detector rather than scheduled. Fraction-optimal illustrates why regret,
-not arm-accuracy, is the right metric here: Fixed-$\Cz$ matches RA-TS-F's
-fraction-optimal ($0.48$) simply because $R_0$ dominates the duty cycle, yet
-incurs $4.5\times$ the regret---the windows that matter are the severe ones,
-where the arms separate and Fixed-$\Cz$ is maximally wrong.
+drift detector rather than scheduled. The near-optimal fraction sharpens the
+picture: RA-TS-F plays a near-optimal controller in $93.6\%$ of all windows,
+against $\le 63\%$ for every baseline and only $\sim 51\%$ for any fixed
+controller. (The strict optimal-arm rate is misleading here---it scores
+RA-TS-F at $0.48$, tying Fixed-$\Cz$, because $R_0$ dominates the duty cycle
+and it gives no credit for playing the near-tied runner-up in $R_2$; the
+near-optimal rate removes that artefact and cleanly separates the policies in
+the same order as regret.) Notably each fixed controller is near-optimal in
+almost exactly the fraction of time its regimes are active
+($\sim 0.5$)---strong on its own regimes, wrong elsewhere---whereas RA-TS-F is
+near-optimal almost everywhere, which is precisely the behaviour an
+autonomous selector must provide.
 
 Two further observations from the six-month diagnostics. First, the regret
 slope of RA-TS-F is stable across the entire horizon

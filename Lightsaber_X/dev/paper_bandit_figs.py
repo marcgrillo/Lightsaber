@@ -21,6 +21,11 @@ import matplotlib.pyplot as plt
 
 OUT = os.path.join("paper", "figs")
 HOLD = 100.0
+FS = 256
+# near-optimal metric: played arm within eps_near of the best achievable expected reward
+_cal = np.load("bandit_runs/calibration.npz", allow_pickle=True)
+ORACLE_TABLE = np.asarray(_cal["oracle_table"], float)     # (arm, regime)
+EPS_NEAR = 0.5 * float(_cal["sigma_hat"])
 TITLES = {"r1long": "r1long  (calmer: longer stable stretches)",
           "r1freq": "r1freq  (harder: switches ~2x more often)"}
 
@@ -61,13 +66,21 @@ tag = "r1long"; cd = f"bandit_runs/cache_1w_{tag}"
 d = load(cd, "RA-TS-F"); orc = load(cd, "Oracle")
 ndec = len(d["rewards"]); days = np.arange(ndec, dtype=np.int64) * HOLD / 86400.0
 true_reg = np.argmax(np.asarray(d["ctx"]), axis=1)
-opt_arm = np.asarray(orc["arms"])
 mode = np.asarray(d["tar_mode"]); J = np.asarray(d["tar_J"])
 acq = (mode == 0).astype(float)
 W = 120
+# per-decision expected reward per arm (from the stored regime mixture) for near-optimal
+man = np.load(os.path.join(cd, "manifest.npz"), allow_pickle=True)
+Wsec = np.asarray(man["Wsec"]); tsec = np.asarray(man["tsec"])
+dec_t = np.arange(ndec, dtype=np.int64) * HOLD
+Wdec = np.vstack([np.interp(dec_t / FS, tsec, Wsec[i]) for i in range(3)])   # (3, ndec)
+exp_r = ORACLE_TABLE @ Wdec                                                  # (arm, ndec)
+best_r = exp_r.max(axis=0)
 
-def fopt(name):
-    a = np.asarray(load(cd, name)["arms"]); return rolling((a == opt_arm), W)
+def fopt(name):  # rolling fraction NEAR-optimal (within eps of the best achievable reward)
+    a = np.asarray(load(cd, name)["arms"])[:ndec]
+    near = (best_r - exp_r[a, np.arange(len(a))] <= EPS_NEAR).astype(float)
+    return rolling(near, W)
 
 fig, ax = plt.subplots(4, 1, figsize=(13, 9), sharex=True)
 ax[0].step(days, true_reg, where="post", color="k", lw=0.8)
@@ -90,7 +103,7 @@ ax[2].text(0.99, 0.14, f"{cr} regimes created; last at day {days[last]:.1f}",
 ax[3].plot(days, fopt("RA-TS-F"), color="tab:green", lw=2.0, label="RA-TS-F")
 ax[3].plot(days, fopt("Rule-based"), color="tab:brown", lw=1.2, label="Rule-based")
 ax[3].plot(days, fopt("D-UCB"), color="tab:red", lw=1.2, label="D-UCB")
-ax[3].set_ylabel("frac. optimal\n(rolling)"); ax[3].set_xlabel("time [days]")
+ax[3].set_ylabel("frac. near-optimal\n(rolling)"); ax[3].set_xlabel("time [days]")
 ax[3].set_ylim(0, 1.02); ax[3].legend(fontsize=8, loc="lower right"); ax[3].grid(alpha=0.3)
 fig.tight_layout(); fig.savefig(os.path.join(OUT, "week_internals_r1long.png"), dpi=130,
                                 bbox_inches="tight"); plt.close(fig)

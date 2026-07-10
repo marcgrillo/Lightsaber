@@ -406,29 +406,19 @@ logistic-mapped reward.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{figs/reward_landscape.png}
-  \caption{Reward landscape. \emph{Top:} per-controller distributions of the
-  raw reward score, one panel per regime, pooling all $745$ settled \SI{2}{s}
-  blocks per (regime, controller) cell ($149$ blocks $\times$ $5$ independent
-  noise realisations; continuous-filter convention). The distributions are
-  broad and strongly overlapping---the per-block noise is far larger than the
-  mean separations---so a single observation carries little information about
-  the acting regime or the best controller; only window-averaging and
-  accumulation across windows resolve the ordering. The regime signatures are
-  visible: in $R_0$ the ordering $\Cz\!>\!\Co\!>\!\Ct$ shows as a rightward
-  shift of $\Cz$ (blue); in $R_1$ all three nearly coincide; in $R_2$ the
-  ordering reverses, with $\Cz$ shifted left. \emph{Bottom:} mean logistic
-  (bandit-space) reward per regime and controller; bar heights and error bars
-  are the mean and standard error \emph{of the five per-seed mean rewards}
-  (one mean per $149$-block realisation), not of the $745$ pooled blocks
-  shown above---the blocks within a realisation are autocorrelated (continuous
-  filtering) and only the five realisations themselves are independent. The
-  diagonal (regime-optimal) controller is
-  largest in each regime and the reward is non-saturating (all $0.31$--$0.60$),
-  but the separations are regime-dependent: large in $R_0$, small in $R_1$, and
-  marginal in $R_2$ where $\Co$ and $\Ct$ are statistically indistinguishable
-  (error bars overlap). What identifies a regime is the \emph{shape} of the
-  mean-reward vector across controllers, not its overall level (similar in
-  $R_0$ and $R_2$).}
+  \caption{Reward landscape: the same data at two levels of averaging.
+  \emph{Top:} distribution of \emph{individual} \SI{2}{s}-block raw scores per
+  controller and regime ($745$ blocks per cell $=$ $5$ independent \SI{360}{s}
+  noise realisations $\times$ $149$ settled blocks each). \emph{Bottom:} each
+  realisation is reduced to its mean reward (in the logistic bandit space);
+  bars show the average of the five realisation means, error bars their
+  standard error. The contrast between the broad histograms and the small
+  error bars is the averaging: a single block is noise-dominated
+  ($\sigma \approx 1.6$, larger than every regime gap), while a $149$-block
+  run mean is $10$--$30\times$ tighter. The ordering---invisible block to
+  block---is thus resolved decisively in $R_0$, clearly in $R_1$, and only
+  marginally in $R_2$, where $\Co$ and $\Ct$ remain statistically
+  indistinguishable.}
   \label{fig:reward}
 \end{figure}
 

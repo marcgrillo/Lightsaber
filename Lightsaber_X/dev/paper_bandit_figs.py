@@ -19,9 +19,14 @@ import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# larger fonts for legible paper figures
+plt.rcParams.update({"font.size": 15, "axes.titlesize": 16, "axes.labelsize": 15,
+                     "xtick.labelsize": 13, "ytick.labelsize": 13, "legend.fontsize": 12})
+
 OUT = os.path.join("paper", "figs")
 HOLD = 100.0
 FS = 256
+ACQ_WIN = 120        # rolling-average window (decisions) for the ACQUIRE-fraction panel
 # near-optimal metric: played arm within eps_near of the best achievable expected reward
 _cal = np.load("bandit_runs/calibration.npz", allow_pickle=True)
 ORACLE_TABLE = np.asarray(_cal["oracle_table"], float)     # (arm, regime)
@@ -61,50 +66,36 @@ fig.tight_layout(); fig.savefig(os.path.join(OUT, "week_regret_curves.png"), dpi
                                 bbox_inches="tight"); plt.close(fig)
 print("week_regret_curves.png")
 
-# ============ FIG 2: RA-TS-F internals on r1long ============
+# ============ FIG 2: RA-TS-F internals on r1long (3 rows) ============
 tag = "r1long"; cd = f"bandit_runs/cache_1w_{tag}"
-d = load(cd, "RA-TS-F"); orc = load(cd, "Oracle")
+d = load(cd, "RA-TS-F")
 ndec = len(d["rewards"]); days = np.arange(ndec, dtype=np.int64) * HOLD / 86400.0
 true_reg = np.argmax(np.asarray(d["ctx"]), axis=1)
 mode = np.asarray(d["tar_mode"]); J = np.asarray(d["tar_J"])
 acq = (mode == 0).astype(float)
-W = 120
-# per-decision expected reward per arm (from the stored regime mixture) for near-optimal
-man = np.load(os.path.join(cd, "manifest.npz"), allow_pickle=True)
-Wsec = np.asarray(man["Wsec"]); tsec = np.asarray(man["tsec"])
-dec_t = np.arange(ndec, dtype=np.int64) * HOLD
-Wdec = np.vstack([np.interp(dec_t / FS, tsec, Wsec[i]) for i in range(3)])   # (3, ndec)
-exp_r = ORACLE_TABLE @ Wdec                                                  # (arm, ndec)
-best_r = exp_r.max(axis=0)
+acq_roll = rolling(acq, ACQ_WIN)
+win_h = ACQ_WIN * HOLD / 3600.0    # rolling window length in hours
 
-def fopt(name):  # rolling fraction NEAR-optimal (within eps of the best achievable reward)
-    a = np.asarray(load(cd, name)["arms"])[:ndec]
-    near = (best_r - exp_r[a, np.arange(len(a))] <= EPS_NEAR).astype(float)
-    return rolling(near, W)
-
-fig, ax = plt.subplots(4, 1, figsize=(13, 9), sharex=True)
-ax[0].step(days, true_reg, where="post", color="k", lw=0.8)
+fig, ax = plt.subplots(3, 1, figsize=(13, 8), sharex=True)
+ax[0].step(days, true_reg, where="post", color="k", lw=1.0)
 ax[0].set_ylabel("true regime"); ax[0].set_yticks([0, 1, 2])
-ax[0].set_title(f"RA-TS-F on {TITLES[tag]}")
+ax[0].set_title(f"RA-TS-F internals on {TITLES[tag]}")
 nsw = int((np.diff(true_reg) != 0).sum())
-ax[0].text(0.99, 0.05, f"{nsw} regime switches", transform=ax[0].transAxes,
-           ha="right", fontsize=9, color="dimgray")
-ax[1].fill_between(days, rolling(acq, W), color="tab:orange", alpha=0.6)
-ax[1].set_ylabel("frac. in\nACQUIRE"); ax[1].set_ylim(0, max(0.3, rolling(acq, W).max() * 1.2))
-ax[1].text(0.99, 0.8, f"overall {acq.mean()*100:.1f}% in ACQUIRE (probe)",
-           transform=ax[1].transAxes, ha="right", fontsize=9, color="chocolate")
-ax[2].step(days, J, where="post", color="tab:blue", lw=1.6)
-ax[2].axhline(3, color="green", ls="--", lw=1, label="true # regimes = 3")
-ax[2].set_ylabel("library size J"); ax[2].legend(fontsize=8, loc="upper left")
-ax[2].set_ylim(0, J.max() + 1.5)
+ax[0].text(0.99, 0.06, f"{nsw} regime switches", transform=ax[0].transAxes,
+           ha="right", color="dimgray")
+# rolling-average fraction of decisions in ACQUIRE (re-identification probe)
+ax[1].fill_between(days, acq_roll, color="tab:orange", alpha=0.6)
+ax[1].set_ylabel(f"frac. in ACQUIRE\n({win_h:.1f} h rolling avg)")
+ax[1].set_ylim(0, max(0.3, acq_roll.max() * 1.2))
+ax[1].text(0.99, 0.82, f"overall {acq.mean()*100:.1f}% of decisions in ACQUIRE (probe)",
+           transform=ax[1].transAxes, ha="right", color="chocolate")
+ax[2].step(days, J, where="post", color="tab:blue", lw=1.8)
+ax[2].axhline(3, color="green", ls="--", lw=1.2, label="true # regimes = 3")
+ax[2].set_ylabel("library size J"); ax[2].legend(loc="upper left")
+ax[2].set_ylim(0, J.max() + 1.5); ax[2].set_xlabel("time [days]")
 cr = int((np.diff(np.r_[0, J]) > 0).sum()); last = int(np.where(np.diff(np.r_[0, J]) > 0)[0][-1])
 ax[2].text(0.99, 0.14, f"{cr} regimes created; last at day {days[last]:.1f}",
-           transform=ax[2].transAxes, ha="right", fontsize=9, color="tab:blue")
-ax[3].plot(days, fopt("RA-TS-F"), color="tab:green", lw=2.0, label="RA-TS-F")
-ax[3].plot(days, fopt("Rule-based"), color="tab:brown", lw=1.2, label="Rule-based")
-ax[3].plot(days, fopt("D-UCB"), color="tab:red", lw=1.2, label="D-UCB")
-ax[3].set_ylabel("frac. near-optimal\n(rolling)"); ax[3].set_xlabel("time [days]")
-ax[3].set_ylim(0, 1.02); ax[3].legend(fontsize=8, loc="lower right"); ax[3].grid(alpha=0.3)
+           transform=ax[2].transAxes, ha="right", color="tab:blue")
 fig.tight_layout(); fig.savefig(os.path.join(OUT, "week_internals_r1long.png"), dpi=130,
                                 bbox_inches="tight"); plt.close(fig)
 print("week_internals_r1long.png")
@@ -140,18 +131,29 @@ fig.tight_layout(); fig.savefig(os.path.join(OUT, "sixmo_cumreward_regret.png"),
                                 bbox_inches="tight"); plt.close(fig)
 print("sixmo_cumreward_regret.png")
 
-# ============ FIG 4: six-month timelines ============
+# ============ FIG 4: six-month timelines -- ZOOMED to a representative window ============
+# The full 180-day timeline is an unreadable dense band; zoom to a ~12-day window that
+# contains an R1 spike plus surrounding R0/R2 stretches so individual switches are legible.
 ctx = np.asarray(data6["RA-TS-F"]["ctx"])[:ndec6]
 sev = 1.0 * ctx[:, 1] + 2.0 * ctx[:, 2]
+w1 = ctx[:, 1]
+spikes = np.where(w1 > 0.5)[0]
+center = next((days6[i] for i in spikes if days6[i] > 20), 45.0)
+ZW = 2.5                                   # half-window [days] -> 5-day zoom
+t0d, t1d = center - ZW, center + ZW
+sel = (days6 >= t0d) & (days6 <= t1d)
 show = ["Oracle", "RA-TS-F", "Rule-based"]
-fig, axes = plt.subplots(len(show) + 1, 1, figsize=(13, 1.6 * (len(show) + 1)), sharex=True)
-axes[0].plot(days6, sev, "k", lw=0.8); axes[0].set_ylabel("severity")
-axes[0].set_title("regime severity and controller choices"); axes[0].grid(alpha=0.3)
+fig, axes = plt.subplots(len(show) + 1, 1, figsize=(13, 2.0 * (len(show) + 1)), sharex=True)
+axes[0].plot(days6[sel], sev[sel], "k", lw=1.4); axes[0].set_ylabel("severity")
+axes[0].set_yticks([0, 1, 2]); axes[0].set_yticklabels(["R0", "R1", "R2"])
+axes[0].set_title(f"regime severity and controller choices "
+                  f"(zoom: days {t0d:.0f}–{t1d:.0f} of the 180-day run)")
+axes[0].grid(alpha=0.3)
 for a, name in zip(axes[1:], show):
     arms = np.asarray(data6[name]["arms"])[:ndec6]
-    a.step(days6, arms, where="post", lw=0.7)
+    a.step(days6[sel], arms[sel], where="post", lw=1.6, color="tab:blue")
     a.set_ylabel(name); a.set_yticks([0, 1, 2]); a.set_yticklabels(["C0", "C1", "C2"]); a.grid(alpha=0.3)
-axes[-1].set_xlabel("time [days]")
+axes[-1].set_xlabel("time [days]"); axes[-1].set_xlim(t0d, t1d)
 fig.tight_layout(); fig.savefig(os.path.join(OUT, "sixmo_timelines.png"), dpi=130,
                                 bbox_inches="tight"); plt.close(fig)
 print("sixmo_timelines.png")

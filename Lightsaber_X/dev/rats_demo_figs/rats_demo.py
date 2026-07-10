@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import bandit_policies as bp
 
+# larger fonts for a legible paper figure
+plt.rcParams.update({"font.size": 15, "axes.titlesize": 16, "axes.labelsize": 15,
+                     "xtick.labelsize": 13, "ytick.labelsize": 13, "legend.fontsize": 12})
+
 # ---- environment: 3 recurring regimes, same level, rotated best arm, gap ~0.09 ----
 RAW = {0: np.array([0.62, 0.53, 0.52]),      # best arm 0
        1: np.array([0.52, 0.62, 0.53]),      # best arm 1
@@ -100,34 +104,35 @@ print("regimes discovered J=%d (true 3)" % len(pol.N))
 print("alarm times:", alarms.tolist())
 print("true switch times:", [EP * k for k in range(1, 6)])
 
-fig, ax = plt.subplots(4, 1, figsize=(13, 9), sharex=True)
+fig, ax = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
 # (a) true regime vs tracked
-ax[0].step(t, rec["z"], where="post", color="k", lw=2, label="true regime z(t)")
+ax[0].step(t, rec["z"], where="post", color="k", lw=2.4, label="true regime z(t)")
 gp = rec["g"].astype(float); gp[gp < 0] = np.nan
-ax[0].step(t, gp, where="post", color="tab:blue", lw=1.4, ls="--", label="RA-TS tracked regime g(t)")
+ax[0].step(t, gp, where="post", color="tab:blue", lw=1.8, ls="--", label="RA-TS tracked regime g(t)")
 ax[0].set_ylabel("regime id"); ax[0].set_yticks([0, 1, 2, 3, 4, 5, 6, 7])
-ax[0].legend(loc="upper right", fontsize=8); ax[0].set_title(
-    "RA-TS-F: identification, drift alarms and recovery (3 recurring regimes)")
+ax[0].legend(loc="upper right", ncol=2); ax[0].set_title(
+    "RA-TS-F on a clean toy environment (3 recurring regimes, discrete switches): "
+    "identification, drift alarms and recovery")
 for a0 in ax:
     shade_acquire(a0, rec, label=(a0 is ax[1]))
     for s in [EP * k for k in range(1, 6)]:
         a0.axvline(s, color="green", ls=":", lw=1, alpha=0.7)
 # (b) played vs best arm
-ax[1].step(t, rec["best"], where="post", color="green", lw=2, alpha=0.6, label="best arm (truth)")
-ax[1].step(t, rec["a"], where="post", color="tab:red", lw=1.0, label="arm played")
-ax[1].set_ylabel("arm"); ax[1].set_yticks([0, 1, 2]); ax[1].legend(loc="upper right", fontsize=8)
+ax[1].step(t, rec["best"], where="post", color="green", lw=2.6, alpha=0.6, label="best arm (truth)")
+ax[1].step(t, rec["a"], where="post", color="tab:red", lw=1.4, label="arm played")
+ax[1].set_ylabel("arm"); ax[1].set_yticks([0, 1, 2]); ax[1].legend(loc="upper right", ncol=2)
 # (c) residual |e_t|
-ax[2].plot(t, np.abs(rec["e"]), color="gray", lw=0.7, label=r"$|e_t|=|Y_t-\mathrm{base}[a]|$")
-ax[2].axhline(NU, color="purple", ls="--", lw=1.2, label=r"$\nu$ (CUSUM slack)")
-ax[2].set_ylabel("|residual|"); ax[2].legend(loc="upper right", fontsize=8); ax[2].set_ylim(0, 0.25)
+ax[2].plot(t, np.abs(rec["e"]), color="gray", lw=0.9, label=r"$|e_t|=|Y_t-\mathrm{base}[a]|$")
+ax[2].axhline(NU, color="purple", ls="--", lw=1.6, label=r"$\nu$ (CUSUM slack)")
+ax[2].set_ylabel("|residual|"); ax[2].legend(loc="upper right", ncol=2); ax[2].set_ylim(0, 0.25)
 # (d) CUSUM G_t
-ax[3].plot(t, G, color="tab:orange", lw=1.4, label=r"CUSUM $G_t$ (played arm)")
-ax[3].axhline(H, color="red", ls="--", lw=1.2, label=r"$h$ (alarm threshold)")
+ax[3].plot(t, G, color="tab:orange", lw=1.8, label=r"CUSUM $G_t$ (played arm)")
+ax[3].axhline(H, color="red", ls="--", lw=1.6, label=r"$h$ (alarm threshold)")
 for s in alarms:
-    ax[3].plot(s, H, "rv", ms=9)
+    ax[3].plot(s, H, "rv", ms=11)
 ax[3].scatter([], [], marker="v", color="red", label="ALARM ($G_t\\geq h$)")
-ax[3].set_ylabel(r"$G_t$"); ax[3].set_xlabel("step t"); ax[3].legend(loc="upper right", fontsize=8)
-plt.tight_layout(); plt.savefig(os.path.join(HERE, "rats_fig1_overview.png"), dpi=120); plt.close()
+ax[3].set_ylabel(r"$G_t$"); ax[3].set_xlabel("step t"); ax[3].legend(loc="upper right", ncol=3)
+plt.tight_layout(); plt.savefig(os.path.join(HERE, "rats_fig1_overview.png"), dpi=130); plt.close()
 
 # FIG 2: zoom on the first drift (true switch at t=EP)
 sw = EP

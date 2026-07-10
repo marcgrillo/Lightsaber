@@ -373,9 +373,9 @@ largest weight and requires this), and the reward of Eq.~\eqref{eq:zreward} is
 the mean over \SI{2}{s} blocks. Statistics are accumulated over five independent
 noise realisations of \SI{360}{s} each (a \SI{60}{s} filter warm-up discarded;
 $\sim$\,$750$ settled blocks per cell). Table~\ref{tab:reward} reports the mean
-raw and logistic-mapped reward; Fig.~\ref{fig:rewardhist} shows the full
-per-controller reward \emph{distributions} in each regime, and
-Fig.~\ref{fig:reward} the corresponding means.
+raw and logistic-mapped reward; Fig.~\ref{fig:reward} shows both the full
+per-controller reward \emph{distributions} in each regime (top) and the mean
+logistic (bandit-space) reward with error bars (bottom).
 
 \begin{table}[t]
   \centering
@@ -398,29 +398,25 @@ Fig.~\ref{fig:reward} the corresponding means.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.8\linewidth]{figs/reward_by_regime_raw.png}
-  \caption{Per-controller distributions of the raw reward score
-  (\SI{2}{s} blocks, continuous-filter convention) in each regime. The
-  distributions are broad and strongly overlapping---the per-block noise is far
-  larger than the mean separations---so a single observation carries little
-  information about the acting regime or the best controller; only
-  window-averaging and accumulation across windows resolve the ordering. Note
-  the regime signatures: in $R_0$ the ordering $\Cz\!>\!\Co\!>\!\Ct$ is visible
-  as a rightward shift of $\Cz$ (blue); in $R_1$ all three distributions nearly
-  coincide (gap $0.16$ raw at $\sigma_{\mathrm{block}}\!\approx\!1.5$); in $R_2$
-  the ordering reverses, with $\Cz$ (blue) shifted left. The \emph{shape} of the
-  mean-reward vector across controllers---not the overall level, which is
-  similar in $R_0$ and $R_2$---is what identifies the regime.}
-  \label{fig:rewardhist}
-\end{figure}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.92\linewidth]{figs/mean_reward_bars.png}
-  \caption{Mean reward per regime and controller, in the raw score
-  (left, with standard-error bars) and in the logistic bandit-reward space
-  (right). The diagonal (regime-optimal) controller is the largest in each
-  regime, and the logistic reward is non-saturating (all values $0.31$--$0.60$).}
+  \includegraphics[width=\linewidth]{figs/reward_landscape.png}
+  \caption{Reward landscape. \emph{Top:} per-controller distributions of the
+  raw reward score (\SI{2}{s} blocks, continuous-filter convention), one panel
+  per regime. The distributions are broad and strongly overlapping---the
+  per-block noise is far larger than the mean separations---so a single
+  observation carries little information about the acting regime or the best
+  controller; only window-averaging and accumulation across windows resolve the
+  ordering. The regime signatures are visible: in $R_0$ the ordering
+  $\Cz\!>\!\Co\!>\!\Ct$ shows as a rightward shift of $\Cz$ (blue); in $R_1$ all
+  three nearly coincide; in $R_2$ the ordering reverses, with $\Cz$ shifted
+  left. \emph{Bottom:} mean logistic (bandit-space) reward per regime and
+  controller; error bars are the standard error of the mean over the five
+  independent noise realisations. The diagonal (regime-optimal) controller is
+  largest in each regime and the reward is non-saturating (all $0.31$--$0.60$),
+  but the separations are regime-dependent: large in $R_0$, small in $R_1$, and
+  marginal in $R_2$ where $\Co$ and $\Ct$ are statistically indistinguishable
+  (error bars overlap). What identifies a regime is the \emph{shape} of the
+  mean-reward vector across controllers, not its overall level (similar in
+  $R_0$ and $R_2$).}
   \label{fig:reward}
 \end{figure}
 
@@ -436,12 +432,12 @@ regret of confusing them is small and contributes little to the integrated cost.
 Third, with the corrected continuous-filter reward the logistic normalisation of
 Eq.~\eqref{eq:logistic}, centred at $r_0 = 167.5$, is \emph{non-saturating} over
 the reward range ($\approx 165$--$169$): the bandit-space rewards span
-$0.31$--$0.60$ across all regimes (Fig.~\ref{fig:reward}, right), so the
+$0.31$--$0.60$ across all regimes (Fig.~\ref{fig:reward}, bottom), so the
 per-regime separation is preserved rather than compressed. A learnable signal is
 therefore present in every regime---strongest in the nominal regime, weakest in
 the extreme regime---which is what makes the online-selection problem well posed.
 
-Fig.~\ref{fig:rewardhist} adds the distributional view that matters for the
+Fig.~\ref{fig:reward} (top) adds the distributional view that matters for the
 online policy: the per-block reward distributions of the three controllers
 overlap almost entirely in every regime. In the bandit-reward space the
 per-window ($T_{\mathrm{hold}}=\SI{100}{s}$) standard deviation is
@@ -590,7 +586,7 @@ problem concrete, and hard, in five specific ways.
 \begin{enumerate}
   \item \textbf{Partial observability of the regime.} The regime identity is
   carried by the \emph{shape} of the per-arm mean-reward vector
-  (Fig.~\ref{fig:rewardhist}), but a policy playing one arm per window sees one
+  (Fig.~\ref{fig:reward}), but a policy playing one arm per window sees one
   coordinate of that vector at a time. Worse, the achievable reward
   \emph{levels} of $R_0$ and $R_2$ nearly coincide, so a change $R_0
   \!\leftrightarrow\! R_2$ can be invisible in the reward stream of the
@@ -719,23 +715,52 @@ and the policy degenerates to nearly-fixed play (85--129 switches per week
 against RA-TS-F's $\sim$\,850; regret $3.6$--$5.9\times$ worse,
 Table~\ref{tab:week}).
 
-Fig.~\ref{fig:ratsdemo} shows the mechanism on an instrumented synthetic run
-with three recurring regimes: the CUSUM statistic of the played arm rests near
-zero within regimes, rises sharply at each hidden switch, and every alarm is
-followed by a brief probe (the shaded ACQUIRE windows, a few steps each) after
-which the correct regime is re-adopted and the optimal arm resumed.
+Fig.~\ref{fig:ratsdemo} shows the mechanism in the cleanest possible setting:
+an instrumented \emph{toy} environment with synthetic rewards drawn from three
+recurring regimes that switch \emph{discretely} (abrupt boundaries, equal
+reward levels, a single fixed gap), using the same detector and matching
+calibration as the production runs. The CUSUM statistic of the played arm rests
+near zero within a regime, rises sharply at each hidden switch, and every alarm
+is followed by a brief ACQUIRE probe (shaded, a few steps each) after which the
+correct regime is recognised and its posterior resumed. Crucially, because the
+regimes here are clean and discrete, the library settles at exactly $J=3$---one
+entry per true regime---and the tracked regime $g(t)$ matches the truth $z(t)$
+throughout.
+
+This is deliberately \emph{not} what happens in the physical environment, and
+the difference is instructive. In the detector simulations the library grows
+beyond the three nominal regimes ($J=8$ over one week, $J=17$ over six months;
+Figs.~\ref{fig:weekinternals} and Sec.~\ref{sec:ba-sixmo}) for two reasons
+absent from the toy. First, the regime gaps are tiny and unequal (down to
+$0.005$ in $R_2$) and identification runs on only $n_{\min}\!=\!3$ noisy probe
+samples per arm, so a recurring regime whose noisy shape estimate misses its
+match margin occasionally founds a duplicate entry rather than resuming the
+original. Second, and more fundamentally, the physical regime transitions are
+\emph{continuous ramps}, not the toy's instantaneous switches
+(Section~\ref{sec:bg-env}); the mid-ramp blended states are genuinely distinct
+reward shapes and the algorithm faithfully files them as short-lived extra
+entries (Sec.~\ref{sec:ba-sixmo} quantifies this). Neither effect degrades
+performance---duplicate entries converge to the same best arm and transition
+entries cover genuinely ambiguous windows---which is why RA-TS-F attains the
+lowest regret despite carrying a ``dirtier'' library than the toy's clean
+$J=3$. The toy thus isolates the mechanism; the real runs show it remains
+effective when the discrete-regime idealisation is only approximate.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.95\linewidth]{figs/rats_overview.png}
-  \caption{RA-TS-F mechanics on an instrumented run with three recurring
-  regimes (synthetic rewards, same calibration as the production runs). From
-  top: true and tracked regime; played arm vs.\ true best arm, with ACQUIRE
-  probes shaded; per-step detector residual $|r - b_a|$ against the CUSUM slack
-  $\nu$; CUSUM statistic $G$ with threshold $h$ and alarms. Every hidden regime
-  switch drives $G$ over threshold within a few decisions; the subsequent
-  ACQUIRE probe lasts only a handful of windows before the returning regime is
-  recognised (shape match) and its posterior resumed.}
+  \includegraphics[width=\linewidth]{figs/rats_overview.png}
+  \caption{RA-TS-F mechanics on a \emph{clean toy} environment: synthetic
+  rewards, three recurring regimes with discrete switches and equal reward
+  levels, same detector/matching calibration as the production runs. From top:
+  true regime $z(t)$ and tracked regime $g(t)$ (they coincide, and the library
+  settles at exactly $J=3$); played arm vs.\ true best arm, with ACQUIRE probes
+  shaded; per-step detector residual $|r - b_a|$ against the CUSUM slack $\nu$;
+  CUSUM statistic $G$ with threshold $h$ and alarms. Every hidden switch drives
+  $G$ over threshold within a few decisions; the subsequent ACQUIRE probe lasts
+  only a handful of windows before the returning regime is recognised (shape
+  match) and its posterior resumed. On the physical environment the same
+  mechanism runs but the library grows beyond $J=3$ (tiny unequal gaps and
+  continuous transitions; see text), without loss of regret.}
   \label{fig:ratsdemo}
 \end{figure}
 
@@ -841,15 +866,15 @@ the three.
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.98\linewidth]{figs/week_internals_r1long.png}
-  \caption{RA-TS-F internals over the r1long week. From top: true regime
-  sequence (38 switches); fraction of decisions spent in ACQUIRE (probing),
-  $9.4\%$ overall, concentrated in short bursts at regime boundaries; library
-  size $J$, stabilising by day 1.7 (at $J=8$: the three true regimes plus
-  noise-split duplicates, see text); rolling fraction near-optimal (within
-  $\tfrac12\hat\sigma$ of the best controller) for RA-TS-F, the rule-based
-  policy, and D-UCB. RA-TS-F recovers to near-optimal play within
-  each regime episode, while the baselines' recovery is slower and, for the
-  rule-based policy, gated on its alarm and periodic re-check schedule.}
+  \caption{RA-TS-F internals over the r1long week (three stacked panels). From
+  top: (i) the true regime sequence ($38$ switches); (ii) the fraction of
+  decisions spent in ACQUIRE (the re-identification probe), shown as a rolling
+  average over a $\SI{3.3}{h}$ ($120$-decision) sliding window---probing is
+  $9.4\%$ of decisions overall and occurs in short bursts localised at the
+  regime boundaries, so between boundaries the policy is pure warm-posterior
+  exploitation; (iii) the library size $J$, which stabilises by day $1.7$ at
+  $J=8$ (the three true regimes plus noise-split duplicates, see text) and adds
+  no further entries over the remaining five days.}
   \label{fig:weekinternals}
 \end{figure}
 
@@ -906,12 +931,19 @@ six-month scale.
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.98\linewidth]{figs/sixmo_timelines.png}
-  \caption{Six-month run: regime severity (top) and controller choices of the
-  Oracle, RA-TS-F, and the rule-based policy. RA-TS-F's schedule visually
-  mirrors the Oracle's ($\sim$\,$17$k switches vs.\ the Oracle's $865$, the
-  excess being brief acquisition probes); the rule-based policy switches
-  rarely ($1683$) and visibly lags the severity pattern, its re-checks being
-  schedule- rather than event-driven.}
+  \caption{Six-month run, zoomed to a representative $5$-day window (the full
+  $180$-day timeline is an unreadable dense band). Top: regime severity
+  ($R_0/R_1/R_2$). Below: controller choices of the Oracle, RA-TS-F, and the
+  rule-based policy. RA-TS-F tracks the regime structure closely---it plays
+  $\Cz$ through the $R_0$ stretches and captures the $R_1$ spikes, with brief
+  vertical bursts marking the acquisition probes at each boundary. Through the
+  $R_2$ stretches it settles on $\Co$ rather than the Oracle's $\Ct$: the two
+  are near-tied there (gap $0.005$, Fig.~\ref{fig:reward}), so Thompson sampling
+  does not distinguish them and the choice costs essentially no regret---this is
+  precisely why the near-optimal fraction, not the strict optimal-arm rate, is
+  the meaningful accuracy metric (Table~\ref{tab:sixmo}). The rule-based policy
+  switches rarely ($1683$ total) and visibly lags the severity pattern, its
+  re-checks being schedule- rather than event-driven.}
   \label{fig:sixmotimelines}
 \end{figure}
 
